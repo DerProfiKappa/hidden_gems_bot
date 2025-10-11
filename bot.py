@@ -3,7 +3,6 @@ import sys, json, random
 
 rng = None
 
-random.seed(1)
 first_tick = True
 
 for line in sys.stdin:
