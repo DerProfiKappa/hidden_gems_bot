@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, json, random
+from brain import Brain
 
 rng = None
 first_tick = True
@@ -76,6 +77,8 @@ def step_towards(startp, ziel, walls):
             return move
     return 'WAIT'
 
+brain = Brain()
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -94,37 +97,21 @@ for line in sys.stdin:
         rng = random.Random(bot_seed ^ 2008)  # deterministisch
         first_tick = False
         log(f"[init] seed={bot_seed} | arena={width}x{height}")
+        brain.update_config(width, height, bot_seed)
 
     bot_pos = tuple(data.get("bot", [0, 0]))
     walls = set(map(tuple, data.get("wall", [])))
     tick = data.get("tick", -1)
+    brain.mark_visited(bot_pos)
 
     gems = data.get("visible_gems", [])
     if not gems:
-        moved = False
-        for name, (dx, dy) in RICHTUNG:
-            nx, ny = bot_pos[0] + dx, bot_pos[1] + dy
-            if im_feld(nx, ny) and (nx, ny) not in walls:
-                log(f"[t{tick}] keine Gems -> versuche {name} | pos={bot_pos}")
-                print(name, flush=True)
-                moved = True
-                break
-        if not moved:
-            log(f"[t{tick}] festgefahren -> WAIT | pos={bot_pos}")
-            print("WAIT", flush=True)
+        move = brain.explore_move(bot_pos, walls)
+        log(f"[t{tick}] keine Gems -> explore={move} | pos={bot_pos}")
+        print(move, flush=True)
         continue
 
-    # Ziel wählen: kleinste distanz, dann größtes ttl
-    def bewertung(gem):
-        position = tuple(gem["position"])
-        entfernung = strecke(bot_pos, position)
-        ttl = int(gem.get("ttl", 0))
-        return (entfernung, -ttl, position)
-
-    gems_sorted = sorted(gems, key=bewertung)
-
-    bester_gem = gems_sorted[0]
-    target = tuple(bester_gem["position"])
+    target, bester_gem = brain.choose_target(bot_pos, gems)
 
     action = step_towards(bot_pos, target, walls)
     log(f"[t{tick}] target={target} ttl={bester_gem.get('ttl')} | action={action} | pos={bot_pos}")
