@@ -9,6 +9,9 @@ RICHTUNG = [('N', (0, -1)), ('E', (1, 0)), ('S', (0, 1)), ('W', (-1, 0))]
 width = 0
 height = 0
 
+def log(*msg):
+    print(*msg, file=sys.stderr, flush=True)
+
 def im_feld(nx, ny):
 
     if width <= 0 or height <= 0:
@@ -90,9 +93,11 @@ for line in sys.stdin:
         height = config.get("height", 0)
         rng = random.Random(bot_seed ^ 2008)  # deterministisch
         first_tick = False
+        log(f"[init] seed={bot_seed} | arena={width}x{height}")
 
     bot_pos = tuple(data.get("bot", [0, 0]))
     walls = set(map(tuple, data.get("wall", [])))
+    tick = data.get("tick", -1)
 
     gems = data.get("visible_gems", [])
     if not gems:
@@ -100,10 +105,12 @@ for line in sys.stdin:
         for name, (dx, dy) in RICHTUNG:
             nx, ny = bot_pos[0] + dx, bot_pos[1] + dy
             if im_feld(nx, ny) and (nx, ny) not in walls:
+                log(f"[t{tick}] keine Gems -> versuche {name} | pos={bot_pos}")
                 print(name, flush=True)
                 moved = True
                 break
         if not moved:
+            log(f"[t{tick}] festgefahren -> WAIT | pos={bot_pos}")
             print("WAIT", flush=True)
         continue
 
@@ -120,4 +127,5 @@ for line in sys.stdin:
     target = tuple(bester_gem["position"])
 
     action = step_towards(bot_pos, target, walls)
+    log(f"[t{tick}] target={target} ttl={bester_gem.get('ttl')} | action={action} | pos={bot_pos}")
     print(action, flush=True)
