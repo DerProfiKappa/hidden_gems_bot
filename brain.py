@@ -1,3 +1,6 @@
+from collections import deque
+
+
 def strecke(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
@@ -15,6 +18,12 @@ class Brain:
             ('W', (-1, 0))
         ]
         self.DIR_MAP = dict(self.RICHTUNG)
+        self.DELTA_TO_DIR = {delta: name for name, delta in self.RICHTUNG}
+        self.plan =[]          # plan
+        self.geplantes_ziel=None
+        self.geplanter_gem =None
+        self.erwartete_pos = None
+        self.geplante_reisezeit =None
 
     def update_config(self, width, height, seed):
         self.width = width
@@ -28,20 +37,130 @@ class Brain:
     def mark_visited(self, pos):
         self.besuchte_felder.add(tuple(pos))
 
-    def choose_target(self, bot_pos, gems):
-        def bewertung(gem):
+    def reset_plan(self):
+        self.plan =[]          # reset
+        self.geplantes_ziel=None
+        self.geplanter_gem =None
+        self.erwartete_pos = None
+        self.geplante_reisezeit =None
+
+    def bfs(self, start, ziel, walls):
+        start = tuple(start)
+        ziel = tuple(ziel)
+        if start == ziel:
+            return [start]
+
+        queue = deque([start])
+        vorgaenger = {start: None}
+
+        while queue:
+            x, y = queue.popleft()
+            if (x, y) == ziel:
+                break
+            for dx, dy in self.DIR_MAP.values():
+                nx = x + dx
+                ny = y + dy
+                nachbar = (nx, ny)
+                if nachbar in vorgaenger:
+                    continue
+                if not self.im_feld(nx, ny):
+                    continue
+                if nachbar in walls:
+                    continue
+                vorgaenger[nachbar] = (x, y)
+                queue.append(nachbar)
+
+        if ziel not in vorgaenger:
+            return None
+
+        pfad = []
+        aktueller = ziel
+        while aktueller is not None:
+            pfad.append(aktueller)
+            aktueller = vorgaenger[aktueller]
+        pfad.reverse()
+        return pfad
+
+    def pfad_zu_moves(self, pfad):
+        moves = []
+        if not pfad:
+            return moves
+        for prev, curr in zip(pfad, pfad[1:]):
+            delta = (curr[0] - prev[0], curr[1] - prev[1])
+            richtung = self.DELTA_TO_DIR.get(delta)
+            if richtung is None:
+                continue
+            moves.append((richtung, curr))
+        return moves
+
+    def choose_target(self, bot_pos, gems, walls):
+        beste_wahl = None
+
+        for gem in gems:
             position = tuple(gem["position"])
-            entfernung = strecke(bot_pos, position)
+            pfad = self.bfs(bot_pos, position, walls)
+            if not pfad:
+                continue
+
+            reisezeit = len(pfad) - 1
             ttl = int(gem.get("ttl", 0))
 
-            score = entfernung - self.gewicht_ttl * ttl   # kleiner Wert = besseres Ziel
+            score = reisezeit - self.gewicht_ttl * ttl   # kleiner besser jetzt
 
-            if entfernung > ttl:    # wenn wahrscheinlich zu spät erreichbar → abwerten
+            if ttl and reisezeit > ttl:    # ttl knapp
                 score += 10
-            return (score, entfernung, position)
 
-        bestes_gem = min(gems, key=bewertung)
-        return tuple(bestes_gem["position"]), bestes_gem
+            daten = (score, reisezeit, position, gem, pfad)
+            if beste_wahl is None or daten < beste_wahl[0]:
+                beste_wahl = (daten, gem, pfad, reisezeit)
+
+        if beste_wahl is None:
+            return None, None, None, None
+
+        _, bestes_gem, pfad, reisezeit = beste_wahl
+        return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
+
+    def plan_gueltig(self, bot_pos, walls, gems):
+        if not self.plan:
+            return False
+        if self.erwartete_pos and tuple(bot_pos) != tuple(self.erwartete_pos):
+            return False
+        if self.plan[0][1] in walls:
+            return False
+        sichtbare_ziel = {tuple(g["position"]) for g in gems}
+        if self.geplantes_ziel and self.geplantes_ziel not in sichtbare_ziel:
+            return False
+        return True
+
+    def stelle_plan_sicher(self, bot_pos, walls, gems):
+        if not gems:
+            self.reset_plan()
+            return None, None, None
+
+        if not self.plan_gueltig(bot_pos, walls, gems):   # <-- plan kaputt
+            ziel, bestes_gem, pfad, reisezeit = self.choose_target(bot_pos, gems, walls)
+            if not pfad:
+                self.reset_plan()
+                return None, None, None
+            self.plan = self.pfad_zu_moves(pfad)
+            self.geplantes_ziel = ziel
+            self.geplanter_gem = bestes_gem
+            self.geplante_reisezeit = reisezeit
+            self.erwartete_pos = None
+
+        return self.geplantes_ziel, self.geplanter_gem, self.geplante_reisezeit
+
+    def next_move(self, bot_pos, walls, gems):
+        ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, walls, gems)
+
+        if not self.plan:
+            self.erwartete_pos = tuple(bot_pos)
+            return 'WAIT', ziel, gem, reisezeit, 0
+
+        richtung, naechster = self.plan.pop(0)
+        self.erwartete_pos = naechster
+        rest = len(self.plan)    # rest schritte 
+        return richtung, ziel, gem, reisezeit, rest
 
     def explore_move(self, bot_pos, walls):
         x, y = bot_pos

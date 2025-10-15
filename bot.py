@@ -5,77 +5,11 @@ from brain import Brain
 rng = None
 first_tick = True
 
-RICHTUNG = [('N', (0, -1)), ('E', (1, 0)), ('S', (0, 1)), ('W', (-1, 0))]
-
 width = 0
 height = 0
 
 def log(*msg):
     print(*msg, file=sys.stderr, flush=True)
-
-def im_feld(nx, ny):
-
-    if width <= 0 or height <= 0:
-        return True
-    return 0 <= nx < width and 0 <= ny < height
-
-
-def strecke(a, b):
-    return abs(a[0]-b[0]) + abs(a[1]-b[1])
-
-def step_towards(startp, ziel, walls):
-    x, y = startp
-    tx, ty = ziel
-
-    if tx > x:
-        dx = 1
-    elif tx < x:
-        dx = -1
-    else:
-        dx = 0
-
-    if ty > y:
-        dy = 1
-    elif ty < y:
-        dy = -1
-    else:
-        dy = 0
-
-    kandidaten = []
-
-    dist_x = abs(tx - x)
-    dist_y = abs(ty - y)
-
-    if dist_x >= dist_y:
-        # zuerst horizontal, dann vertikal
-        if dx != 0:
-            if dx == 1:
-                kandidaten.append(('E', (x + 1, y)))
-            else:
-                kandidaten.append(('W', (x - 1, y)))
-        if dy != 0:
-            if dy == 1:
-                kandidaten.append(('S', (x, y + 1)))
-            else:
-                kandidaten.append(('N', (x, y - 1)))
-    else:
-        # zuerst vertikal, dann horizontal
-        if dy != 0:
-            if dy == 1:
-                kandidaten.append(('S', (x, y + 1)))
-            else:
-                kandidaten.append(('N', (x, y - 1)))
-        if dx != 0:
-            if dx == 1:
-                kandidaten.append(('E', (x + 1, y)))
-            else:
-                kandidaten.append(('W', (x - 1, y)))
-
-    # -- > Wände blocken
-    for move, (nx, ny) in kandidaten:
-        if im_feld(nx, ny) and (nx, ny) not in walls:
-            return move
-    return 'WAIT'
 
 brain = Brain()
 
@@ -111,8 +45,15 @@ for line in sys.stdin:
         print(move, flush=True)
         continue
 
-    target, bester_gem = brain.choose_target(bot_pos, gems)
+    action, ziel, bester_gem, reisezeit, rest =brain.next_move(bot_pos, walls, gems)  # brain sagt l
 
-    action = step_towards(bot_pos, target, walls)
-    log(f"[t{tick}] target={target} ttl={bester_gem.get('ttl')} | action={action} | pos={bot_pos}")
+    if action == 'WAIT' and ziel is None:
+        action = brain.explore_move(bot_pos, walls)
+        log(f"[t{tick}] kein erreichbares Gem -> fallback={action} | pos={bot_pos}")
+        print(action, flush=True)
+        continue
+
+    ttl = bester_gem.get("ttl") if bester_gem else None
+    log(f"[t{tick}] ziel={ziel} ttl={ttl} reise={reisezeit} rest={rest} | action={action} | pos={bot_pos}")
     print(action, flush=True)
+    
