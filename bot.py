@@ -38,22 +38,16 @@ for line in sys.stdin:
     tick = data.get("tick", -1)
     brain.mark_visited(bot_pos)
 
-    gems = data.get("visible_gems", [])
-    if not gems:
-        move = brain.explore_move(bot_pos, walls)
-        log(f"[t{tick}] keine Gems -> explore={move} | pos={bot_pos}")
-        print(move, flush=True)
-        continue
+    gems =data.get("visible_gems", [])
+    action ,ziel ,bester_gem ,reisezeit ,rest =brain.next_move(bot_pos, walls, gems)
 
-    action, ziel, bester_gem, reisezeit, rest =brain.next_move(bot_pos, walls, gems)  # brain sagt l
-
-    if action == 'WAIT' and ziel is None:
+    if action =='WAIT' and ziel is None:
         action = brain.explore_move(bot_pos, walls)
-        log(f"[t{tick}] kein erreichbares Gem -> fallback={action} | pos={bot_pos}")
+        log(f"[t{tick}] kein Ziel -> explore={action} | pos={bot_pos} | sicht={len(gems)}")
         print(action, flush=True)
         continue
 
     ttl = bester_gem.get("ttl") if bester_gem else None
-    log(f"[t{tick}] ziel={ziel} ttl={ttl} reise={reisezeit} rest={rest} | action={action} | pos={bot_pos}")
+    log(f"[t{tick}] sicht={len(gems)} ziel={ziel} ttl_an={ttl} reise={reisezeit} rest={rest} | action={action} | pos={bot_pos}")
     print(action, flush=True)
     
