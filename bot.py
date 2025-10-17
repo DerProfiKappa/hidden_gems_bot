@@ -35,11 +35,12 @@ for line in sys.stdin:
 
     bot_pos = tuple(data.get("bot", [0, 0]))
     walls = set(map(tuple, data.get("wall", [])))
+    floors = set(map(tuple, data.get("floor", [])))
     tick = data.get("tick", -1)
     brain.mark_visited(bot_pos)
 
     gems =data.get("visible_gems", [])
-    action ,ziel ,bester_gem ,reisezeit ,rest =brain.next_move(bot_pos, walls, gems)
+    action ,ziel ,bester_gem ,reisezeit ,rest =brain.next_move(bot_pos, walls, floors, gems)
 
     if action =='WAIT' and ziel is None:
         action = brain.explore_move(bot_pos, walls)

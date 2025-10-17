@@ -26,6 +26,9 @@ class Brain:
         self.geplanter_gem =None
         self.erwartete_pos = None
         self.geplante_reisezeit =None
+        self.bekannte_waende = set()
+        self.bekannter_boden = set()
+        self.unbesuchte_felder = set()
 
     def update_config(self, width, height, seed):
         self.width =width
@@ -41,7 +44,27 @@ class Brain:
         return 0 <= x < self.width and 0 <= y < self.height
 
     def mark_visited(self, pos):
-        self.besuchte_felder.add(tuple(pos))
+        punkt =tuple(pos)
+        self.besuchte_felder.add(punkt)
+        self.unbesuchte_felder.discard(punkt)
+
+    def aktualisiere_umgebung(self, bot_pos, walls, floors):
+        if walls:
+            self.bekannte_waende.update(set(walls))
+            self.hat_wand_gesehen = True
+        sichtbarer_boden = set(floors)
+        if sichtbarer_boden:
+            self.bekannter_boden.update(sichtbarer_boden)
+            for feld in sichtbarer_boden:
+                if feld not in self.besuchte_felder and feld not in self.bekannte_waende:
+                    self.unbesuchte_felder.add(feld)
+        self.unbesuchte_felder.discard(tuple(bot_pos))
+
+    def kombi_walls(self, walls):
+        mix = set(walls)
+        if self.bekannte_waende:
+            mix.update(self.bekannte_waende)
+        return mix
 
     def reset_plan(self):
         self.plan =[]          # reset
@@ -227,13 +250,15 @@ class Brain:
 
         return self.geplantes_ziel, self.geplanter_gem, self.geplante_reisezeit
 
-    def next_move(self, bot_pos, walls, gems):
+    def next_move(self, bot_pos, walls, floors, gems):
+        self.aktualisiere_umgebung(bot_pos, walls, floors)
+        alle_walls = self.kombi_walls(walls)
         self.aktualisiere_gems(bot_pos, gems)
 
-        ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, walls, gems)
+        ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
 
         if not self.plan:
-            idle = self.idle_move(bot_pos, walls)
+            idle = self.idle_move(bot_pos, alle_walls)
             if idle != 'WAIT':
                 dx, dy = self.DIR_MAP[idle]
                 self.erwartete_pos = (bot_pos[0]+dx , bot_pos[1]+dy)
@@ -241,9 +266,11 @@ class Brain:
                 self.erwartete_pos = tuple(bot_pos)
             return idle ,ziel ,gem ,reisezeit ,0
 
-        if self.plan[0][1] in walls:
-            self.erwartete_pos = tuple(bot_pos)
-            return 'WAIT', ziel, gem, reisezeit, 0
+        if self.plan and self.plan[0][1] in alle_walls:
+            ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
+            if not self.plan or (self.plan and self.plan[0][1] in alle_walls):
+                ausweich = self.explore_move(bot_pos, alle_walls)
+                return ausweich ,ziel ,gem ,reisezeit ,0
 
         richtung, naechster = self.plan.pop(0)
         self.erwartete_pos = naechster
@@ -251,6 +278,18 @@ class Brain:
         return richtung, ziel, gem, reisezeit, rest
 
     def explore_move(self, bot_pos, walls):
+        alle_walls = self.kombi_walls(walls)
+        if self.unbesuchte_felder:
+            ziel = min(self.unbesuchte_felder, key=lambda pos: strecke(bot_pos, pos))
+            pfad = self.bfs(bot_pos, ziel, alle_walls)
+            if pfad and len(pfad)>1:
+                naechster = pfad[1]
+                delta = (naechster[0]-bot_pos[0], naechster[1]-bot_pos[1])
+                richtung = self.DELTA_TO_DIR.get(delta)
+                if richtung:
+                    self.erwartete_pos = naechster
+                    return richtung
+            self.unbesuchte_felder.discard(ziel)
         x, y = bot_pos
         gerade_zeile = (y % 2 == 0)
 
@@ -269,8 +308,11 @@ class Brain:
             dx, dy = self.DIR_MAP[name]
             nx = x + dx
             ny = y + dy
-            if self.im_feld(nx, ny) and (nx, ny) not in walls:
+            if self.im_feld(nx, ny) and (nx, ny) not in alle_walls:
+                self.unbesuchte_felder.discard((nx, ny))
+                self.erwartete_pos = (nx, ny)
                 return name
 
         # Wenn alles blockiert ist ---> stehen bleiben
+        self.erwartete_pos = tuple(bot_pos)
         return 'WAIT'
