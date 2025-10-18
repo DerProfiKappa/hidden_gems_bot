@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-import sys, json, random
+import sys, json
 from brain import Brain
 
-rng = None
 first_tick = True
 
 width = 0
@@ -28,10 +27,9 @@ for line in sys.stdin:
         bot_seed = config.get("bot_seed", 1)
         width  = config.get("width", 0)
         height = config.get("height", 0)
-        rng = random.Random(bot_seed ^ 2008)  # deterministisch
         first_tick = False
         log(f"[init] seed={bot_seed} | arena={width}x{height}")
-        brain.update_config(width, height, bot_seed)
+        brain.update_config(width, height, bot_seed, config)
 
     bot_pos = tuple(data.get("bot", [0, 0]))
     walls = set(map(tuple, data.get("wall", [])))
