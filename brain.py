@@ -1,4 +1,5 @@
 from collections import deque
+from maps import MapState
 
 
 def strecke(a, b):
@@ -11,8 +12,8 @@ class Brain:
         self.height = 0
         self.besuchte_felder = set()
         self.hat_wand_gesehen = False
-        self.bekannte_gems ={}
-        self.center =None
+        self.bekannte_gems = {}
+        self.center = None
         self.frontier_felder = set()
         self.RICHTUNG = [
             ('N', (0, -1)),
@@ -22,32 +23,46 @@ class Brain:
         ]
         self.DIR_MAP = dict(self.RICHTUNG)
         self.DELTA_TO_DIR = {delta: name for name, delta in self.RICHTUNG}
-        self.plan =[]          # plan
-        self.geplantes_ziel=None
-        self.geplanter_gem =None
+        self.plan = []
+        self.geplantes_ziel = None
+        self.geplanter_gem = None
         self.erwartete_pos = None
-        self.geplante_reisezeit =None
+        self.geplante_reisezeit = None
         self.bekannte_waende = set()
         self.bekannter_boden = set()
         self.unbesuchte_felder = set()
-        self.max_kombi =4
-        self.stage_max_gems =0
+        self.max_kombi = 4
+        self.stage_max_gems = 0
         self.full_map_sicht = False
+        self.pos_history = deque(maxlen=4)
+        self.visit_count = {}
+        self.recent_explore_targets = deque(maxlen=20)
+        self.aktuelles_explore_ziel = None
+        self.map = MapState(
+            visited_ref=self.besuchte_felder,
+            walls_ref=self.bekannte_waende,
+            floor_ref=self.bekannter_boden,
+            unvisited_ref=self.unbesuchte_felder,
+            frontier_ref=self.frontier_felder,
+            visit_count_ref=self.visit_count
+        )
 
     def update_config(self, width, height, seed, config=None):
-        self.width =width
-        self.height =height
-        if width>0 and height >0:
-            x =max(1, min(width-2,width//2))
-            y =max(1,min(height-2, height//2))
-            self.center =(x, y)
+        self.width = width
+        self.height = height
+        self.map.update_config(width, height)
+        if width > 0 and height > 0:
+            self.unbesuchte_felder = {(ix, iy) for ix in range(width) for iy in range(height)}
+            x = max(1, min(width - 2, width // 2))
+            y = max(1, min(height - 2, height // 2))
+            self.center = (x, y)
         if config:
-            self.stage_max_gems =config.get("max_gems" ,self.stage_max_gems)
-            vis =config.get("vis_radius")
-            if vis is not None and max(self.width ,self.height)>0:
-                self.full_map_sicht = (vis >= max(self.width ,self.height))
-            if self.stage_max_gems and self.stage_max_gems <=1:
-                self.max_kombi =1
+            self.stage_max_gems = config.get("max_gems", self.stage_max_gems)
+            vis = config.get("vis_radius")
+            if vis is not None and max(self.width, self.height) > 0:
+                self.full_map_sicht = (vis >= max(self.width, self.height))
+            if self.stage_max_gems and self.stage_max_gems <= 1:
+                self.max_kombi = 1
 
     def im_feld(self, x, y):
         if self.width <= 0 or self.height <= 0:
@@ -55,107 +70,73 @@ class Brain:
         return 0 <= x < self.width and 0 <= y < self.height
 
     def mark_visited(self, pos):
-        punkt =tuple(pos)
-        self.besuchte_felder.add(punkt)
-        self.unbesuchte_felder.discard(punkt)
-        self.frontier_felder.discard(punkt)
+        self.map.mark_visited(pos)
 
     def aktualisiere_umgebung(self, bot_pos, walls, floors):
         if walls:
-            self.bekannte_waende.update(set(walls))
             self.hat_wand_gesehen = True
-        sichtbarer_boden = set(floors)
-        if sichtbarer_boden:
-            self.bekannter_boden.update(sichtbarer_boden)
-            for feld in sichtbarer_boden:
-                if feld not in self.besuchte_felder and feld not in self.bekannte_waende:
-                    self.unbesuchte_felder.add(feld)
-        self.bekannter_boden.add(tuple(bot_pos))
-        self.unbesuchte_felder.discard(tuple(bot_pos))
-        self.aktualisiere_frontier()
+        self.map.update_environment(bot_pos, walls, floors, self.DIR_MAP.values())
 
     def kombi_walls(self, walls):
-        mix = set(walls)
-        if self.bekannte_waende:
-            mix.update(self.bekannte_waende)
-        return mix
+        return self.map.kombi_walls(walls)
 
     def zaehle_unbekannte_nachbarn(self, feld):
-        unbekannte =0
-        fx ,fy =feld
-        for dx ,dy in self.DIR_MAP.values():
-            nx =fx+dx
-            ny =fy+dy
-            if not self.im_feld(nx ,ny):
-                continue
-            nachbar =(nx ,ny)
-            if nachbar in self.bekannte_waende:
-                continue
-            if nachbar in self.bekannter_boden:
-                continue
-            unbekannte +=1
-        return unbekannte
+        return self.map.zaehle_unbekannte_nachbarn(feld, self.DIR_MAP.values())
 
     def aktualisiere_frontier(self):
-        if not self.bekannter_boden:
-            self.frontier_felder = set()
-            return
-        neue_frontier =set()
-        for feld in self.bekannter_boden:
-            if feld in self.bekannte_waende:
-                continue
-            if self.zaehle_unbekannte_nachbarn(feld)>0:
-                neue_frontier.add(feld)
-        self.frontier_felder = neue_frontier
+        self.map.aktualisiere_frontier(self.DIR_MAP.values())
 
     def reset_plan(self):
-        self.plan =[]          # reset
-        self.geplantes_ziel=None
-        self.geplanter_gem =None
+        self.plan = []
+        self.geplantes_ziel = None
+        self.geplanter_gem = None
         self.erwartete_pos = None
-        self.geplante_reisezeit =None
+        self.geplante_reisezeit = None
+        self.aktuelles_explore_ziel = None
 
     def aktualisiere_gems(self, bot_pos, sichtbare_gems):
-        bot_pos =tuple(bot_pos)
-        neue_cache ={}
+        bot_pos = tuple(bot_pos)
+        neue_cache = {}
 
         for pos, ttl in self.bekannte_gems.items():
-            rest =ttl-1
-            if rest>0 and pos !=bot_pos:
-                neue_cache[pos] =rest
+            rest = ttl - 1
+            if rest > 0 and pos != bot_pos:
+                neue_cache[pos] = rest
 
         for gem in sichtbare_gems:
-            position =tuple(gem.get("position" ,[]))
-            ttl_roh =gem.get("ttl")
+            position = tuple(gem.get("position", []))
+            ttl_roh = gem.get("ttl")
             if position and ttl_roh is not None:
                 try:
-                    ttl =int(ttl_roh)
-                except (TypeError ,ValueError):
+                    ttl = int(ttl_roh)
+                except (TypeError, ValueError):
                     continue
                 neue_cache[position] = ttl
 
         self.bekannte_gems = neue_cache
+        if not sichtbare_gems:
+            self.aktuelles_explore_ziel = None
 
     def manhattan_path(self, start, ziel):
-        pfad =[tuple(start)]
-        x, y =start
-        zx ,zy =ziel
+        pfad = [tuple(start)]
+        x, y = start
+        zx, zy = ziel
 
-        if x !=zx:
-            schritt_x = 1 if zx>x else -1
-            while x!= zx:
-                x +=schritt_x
-                if not self.im_feld(x ,y):
+        if x != zx:
+            schritt_x = 1 if zx > x else -1
+            while x != zx:
+                x += schritt_x
+                if not self.im_feld(x, y):
                     return None
-                pfad.append((x ,y))
+                pfad.append((x, y))
 
-        if y!= zy:
-            schritt_y = 1 if zy>y else -1
+        if y != zy:
+            schritt_y = 1 if zy > y else -1
             while y != zy:
                 y += schritt_y
-                if not self.im_feld(x ,y):
+                if not self.im_feld(x, y):
                     return None
-                pfad.append((x ,y))
+                pfad.append((x, y))
 
         return pfad
 
@@ -215,31 +196,27 @@ class Brain:
         if not self.bekannte_gems:
             return None, None, None, None
 
-        pfad_cache ={}
+        pfad_cache = {}
 
         def hole_pfad(start, ziel):
-            key =(tuple(start) ,tuple(ziel))
+            key = (tuple(start), tuple(ziel))
             if key in pfad_cache:
                 return pfad_cache[key]
-            pfad =None
-            if not self.hat_wand_gesehen and not walls:
-                pfad = self.manhattan_path(tuple(start) ,tuple(ziel))
-            if pfad is None:
-                pfad = self.bfs(tuple(start) ,tuple(ziel), walls)
+            pfad = self.bfs(tuple(start), tuple(ziel), walls)
             if pfad:
-                dist = len(pfad)-1
-                pfad_cache[key] =(pfad ,dist)
+                dist = len(pfad) - 1
+                pfad_cache[key] = (pfad, dist)
                 rev = list(reversed(pfad))
-                pfad_cache[(tuple(ziel) ,tuple(start))] =(rev ,dist)
+                pfad_cache[(tuple(ziel), tuple(start))] = (rev, dist)
                 return pfad_cache[key]
-            pfad_cache[key] =(None ,None)
+            pfad_cache[key] = (None, None)
             return pfad_cache[key]
 
         def route_besser(neu, alt):
             if alt is None:
                 return True
-            rneu = neu[0] / max(1 ,neu[1])
-            ralt = alt[0] / max(1 ,alt[1])
+            rneu = neu[0] / max(1, neu[1])
+            ralt = alt[0] / max(1, alt[1])
             if rneu != ralt:
                 return rneu > ralt
             if neu[0] != alt[0]:
@@ -249,59 +226,59 @@ class Brain:
             return neu[2] > alt[2]
 
         def suche_route(start, rest_map, score, zeit, tiefe):
-            beste =(score ,zeit ,tiefe)
+            beste = (score, zeit, tiefe)
             if tiefe >= self.max_kombi or not rest_map:
                 return beste
-            for pos2 ,ttl2 in rest_map.items():
-                pfad2 ,dist2 = hole_pfad(start ,pos2)
+            for pos2, ttl2 in rest_map.items():
+                pfad2, dist2 = hole_pfad(start, pos2)
                 if not pfad2:
                     continue
                 arrival2 = ttl2 - dist2
-                if arrival2 <=0:
+                if arrival2 <= 0:
                     continue
-                neue_rest ={}
-                for pos3 ,ttl3 in rest_map.items():
+                neue_rest = {}
+                for pos3, ttl3 in rest_map.items():
                     if pos3 == pos2:
                         continue
                     rest_ttl = ttl3 - dist2
-                    if rest_ttl >0:
+                    if rest_ttl > 0:
                         neue_rest[pos3] = rest_ttl
-                kandidat = suche_route(pos2 ,neue_rest ,score + arrival2 ,zeit + dist2 ,tiefe +1)
-                if route_besser(kandidat ,beste):
+                kandidat = suche_route(pos2, neue_rest, score + arrival2, zeit + dist2, tiefe + 1)
+                if route_besser(kandidat, beste):
                     beste = kandidat
             return beste
 
-        kandidaten = sorted(self.bekannte_gems.items(), key=lambda item:(-item[1] ,strecke(bot_pos ,item[0])))
+        kandidaten = sorted(self.bekannte_gems.items(), key=lambda item: (-item[1], strecke(bot_pos, item[0])))
         kandidaten = kandidaten[:8]
-        beste_wahl =None
+        beste_wahl = None
 
-        for position ,ttl in kandidaten:
-            if ttl <=0:
+        for position, ttl in kandidaten:
+            if ttl <= 0:
                 continue
-            pfad ,dist = hole_pfad(bot_pos ,position)
+            pfad, dist = hole_pfad(bot_pos, position)
             if not pfad:
                 continue
             arrival_ttl = ttl - dist
-            if arrival_ttl <=0:
+            if arrival_ttl <= 0:
                 continue
 
-            rest_map ={}
-            for pos2 ,ttl2 in self.bekannte_gems.items():
+            rest_map = {}
+            for pos2, ttl2 in self.bekannte_gems.items():
                 if pos2 == position:
                     continue
                 neu_ttl = ttl2 - dist
-                if neu_ttl >0:
+                if neu_ttl > 0:
                     rest_map[pos2] = neu_ttl
 
-            kombi = suche_route(position ,rest_map ,arrival_ttl ,dist ,1)
-            kombi_score ,kombi_zeit ,kombi_tiefe =kombi
-            zeit = max(1 ,kombi_zeit)
+            kombi = suche_route(position, rest_map, arrival_ttl, dist, 1)
+            kombi_score, kombi_zeit, kombi_tiefe = kombi
+            zeit = max(1, kombi_zeit)
             effizienz = kombi_score / zeit
 
-            wertung =(-effizienz , -kombi_score ,kombi_zeit , -arrival_ttl ,dist , -kombi_tiefe ,position)
-            if beste_wahl is None or wertung <beste_wahl[0]:
-                bestes_gem ={"position": list(position) , "ttl": arrival_ttl}
-                beste_wahl =(wertung ,bestes_gem ,pfad ,dist)
+            wertung = (-effizienz, -kombi_score, kombi_zeit, -arrival_ttl, dist, -kombi_tiefe, position)
+            if beste_wahl is None or wertung < beste_wahl[0]:
+                bestes_gem = {"position": list(position), "ttl": arrival_ttl}
+                beste_wahl = (wertung, bestes_gem, pfad, dist)
 
         if beste_wahl is None:
             return None, None, None, None
@@ -313,28 +290,25 @@ class Brain:
         if not self.center:
             return 'WAIT'
 
-        cx ,cy =self.center
-        bx ,by =bot_pos
-        kandidaten =[]
+        cx, cy = self.center
+        bx, by = bot_pos
+        kandidaten = []
 
         if bx < cx:
             kandidaten.append('E')
-        elif bx >cx:
+        elif bx > cx:
             kandidaten.append('W')
 
-        if by <cy:
+        if by < cy:
             kandidaten.append('S')
         elif by > cy:
             kandidaten.append('N')
 
-        if not kandidaten:
-            return 'WAIT'
-
         for name in kandidaten:
-            dx ,dy =self.DIR_MAP[name]
-            nx =bx+dx
-            ny =by+dy
-            if self.im_feld(nx ,ny) and (nx, ny) not in walls:
+            dx, dy = self.DIR_MAP[name]
+            nx = bx + dx
+            ny = by + dy
+            if self.im_feld(nx, ny) and (nx, ny) not in walls:
                 return name
 
         return 'WAIT'
@@ -358,104 +332,180 @@ class Brain:
         return self.geplantes_ziel, self.geplanter_gem, self.geplante_reisezeit
 
     def next_move(self, bot_pos, walls, floors, gems):
+        # falls letzter Schritt blockiert war -> als Wand merken und neu planen
+        if self.erwartete_pos and tuple(bot_pos) != tuple(self.erwartete_pos):
+            self.bekannte_waende.add(tuple(self.erwartete_pos))
+            self.hat_wand_gesehen = True
+            self.reset_plan()
+
+        # Positions-Historie und Kreisbrecher
+        self.pos_history.append(tuple(bot_pos))
+        if len(self.pos_history) == self.pos_history.maxlen and len(set(self.pos_history)) <= 2:
+            for p in set(self.pos_history):
+                self.visit_count[p] = self.visit_count.get(p, 0) + 2
+            self.reset_plan()
+
         self.aktualisiere_umgebung(bot_pos, walls, floors)
         alle_walls = self.kombi_walls(walls)
         self.aktualisiere_gems(bot_pos, gems)
 
         ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
 
+        # Wenn wir 2 Ticks auf derselben Stelle stehen -> Plan verwerfen und zwingend explorieren
+        if len(self.pos_history) >= 2 and self.pos_history[-1] == self.pos_history[-2]:
+            if walls:
+                self.bekannte_waende.intersection_update(walls)
+            self.reset_plan()
+            force = self.explore_move(bot_pos, set(walls))
+            if force != 'WAIT':
+                dx, dy = self.DIR_MAP[force]
+                self.erwartete_pos = (bot_pos[0] + dx, bot_pos[1] + dy)
+                return force, ziel, gem, reisezeit, 0
+
         if not self.plan:
+            explore = self.explore_move(bot_pos, alle_walls)
+            if explore != 'WAIT':
+                dx, dy = self.DIR_MAP[explore]
+                self.erwartete_pos = (bot_pos[0] + dx, bot_pos[1] + dy)
+                return explore, ziel, gem, reisezeit, 0
+
             idle = self.idle_move(bot_pos, alle_walls)
             if idle != 'WAIT':
                 dx, dy = self.DIR_MAP[idle]
-                self.erwartete_pos = (bot_pos[0]+dx , bot_pos[1]+dy)
+                self.erwartete_pos = (bot_pos[0] + dx, bot_pos[1] + dy)
             else:
                 self.erwartete_pos = tuple(bot_pos)
-            return idle ,ziel ,gem ,reisezeit ,0
+            return idle, ziel, gem, reisezeit, 0
 
         if self.plan and self.plan[0][1] in alle_walls:
             ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
             if not self.plan or (self.plan and self.plan[0][1] in alle_walls):
                 ausweich = self.explore_move(bot_pos, alle_walls)
-                return ausweich ,ziel ,gem ,reisezeit ,0
+                return ausweich, ziel, gem, reisezeit, 0
 
         richtung, naechster = self.plan.pop(0)
         self.erwartete_pos = naechster
-        rest = len(self.plan)    # rest schritte 
+        rest = len(self.plan)
         return richtung, ziel, gem, reisezeit, rest
 
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
-        if self.frontier_felder:
-            kandidaten = sorted(self.frontier_felder, key=lambda pos: strecke(bot_pos, pos))[:8]
-            beste =None
-            for ziel in kandidaten:
-                pfad = self.bfs(bot_pos, ziel, alle_walls)
-                if not pfad or len(pfad)<2:
-                    continue
-                dist = len(pfad)-1
-                unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
-                wertung =(dist , -unbekannte ,ziel)
-                if beste is None or wertung <beste[0]:
-                    beste =(wertung ,pfad)
-            if beste:
-                naechster =beste[1][1]
-                delta =(naechster[0]-bot_pos[0] ,naechster[1]-bot_pos[1])
+
+        # 0) aktives Explorationsziel weiterverfolgen, falls erreichbar
+        if self.aktuelles_explore_ziel:
+            pfad = self.bfs(bot_pos, self.aktuelles_explore_ziel, alle_walls)
+            if pfad and len(pfad) > 1:
+                naechster = pfad[1]
+                delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                 richtung = self.DELTA_TO_DIR.get(delta)
                 if richtung:
-                    self.erwartete_pos =naechster
+                    self.erwartete_pos = naechster
                     return richtung
+            else:
+                self.aktuelles_explore_ziel = None
+
+        kandidaten_frontier = []
+        if self.frontier_felder:
+            for ziel in self.frontier_felder:
+                if ziel in self.recent_explore_targets:
+                    continue
+                pfad = self.bfs(bot_pos, ziel, alle_walls)
+                if not pfad or len(pfad) < 2:
+                    continue
+                dist = len(pfad) - 1
+                unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
+                odw = self.visit_count.get(ziel, 0)
+                wertung = (dist + odw * 4, -unbekannte, odw, ziel, pfad)
+                kandidaten_frontier.append(wertung)
+
+        kandidaten_unvisited = []
+        if self.unbesuchte_felder and not self.full_map_sicht:
+            for ziel in self.unbesuchte_felder:
+                if ziel in self.recent_explore_targets:
+                    continue
+                pfad = self.bfs(bot_pos, ziel, alle_walls)
+                if not pfad or len(pfad) < 2:
+                    continue
+                dist = len(pfad) - 1
+                odw = self.visit_count.get(ziel, 0)
+                wertung = (dist + odw * 4, odw, ziel, pfad)
+                kandidaten_unvisited.append(wertung)
+
+        ziel_pfadrichtung = None
+        if kandidaten_frontier:
+            kandidaten_frontier.sort()
+            _, _, _, ziel, pfad = kandidaten_frontier[0]
+            ziel_pfadrichtung = (ziel, pfad)
+        elif kandidaten_unvisited:
+            kandidaten_unvisited.sort()
+            _, _, ziel, pfad = kandidaten_unvisited[0]
+            ziel_pfadrichtung = (ziel, pfad)
+
+        if ziel_pfadrichtung:
+            ziel, pfad = ziel_pfadrichtung
+            self.aktuelles_explore_ziel = ziel
+            self.recent_explore_targets.append(ziel)
+            naechster = pfad[1]
+            delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
+            richtung = self.DELTA_TO_DIR.get(delta)
+            if richtung:
+                self.erwartete_pos = naechster
+                return richtung
+
         if self.full_map_sicht and not self.bekannte_gems:
             if self.center and tuple(bot_pos) != self.center:
-                pfad_c =None
+                pfad_c = None
                 if not self.hat_wand_gesehen and not alle_walls:
-                    pfad_c = self.manhattan_path(bot_pos ,self.center)
+                    pfad_c = self.manhattan_path(bot_pos, self.center)
                 if pfad_c is None:
-                    pfad_c = self.bfs(bot_pos ,self.center, alle_walls)
-                if pfad_c and len(pfad_c)>1:
-                    naechster =pfad_c[1]
-                    delta =(naechster[0]-bot_pos[0] ,naechster[1]-bot_pos[1])
+                    pfad_c = self.bfs(bot_pos, self.center, alle_walls)
+                if pfad_c and len(pfad_c) > 1:
+                    naechster = pfad_c[1]
+                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                     richtung = self.DELTA_TO_DIR.get(delta)
                     if richtung:
-                        self.erwartete_pos =naechster
+                        self.erwartete_pos = naechster
                         return richtung
             self.erwartete_pos = tuple(bot_pos)
             return 'WAIT'
 
         if self.unbesuchte_felder and not self.full_map_sicht:
-            ziel = min(self.unbesuchte_felder, key=lambda pos: strecke(bot_pos, pos))
-            pfad = self.bfs(bot_pos, ziel, alle_walls)
-            if pfad and len(pfad)>1:
-                naechster = pfad[1]
-                delta = (naechster[0]-bot_pos[0], naechster[1]-bot_pos[1])
+            beste = None
+            for ziel in self.unbesuchte_felder:
+                if ziel in self.recent_explore_targets:
+                    continue
+                pfad = self.bfs(bot_pos, ziel, alle_walls)
+                if not pfad or len(pfad) < 2:
+                    continue
+                dist = len(pfad) - 1
+                wertung = (dist, ziel)
+                if beste is None or wertung < beste[0]:
+                    beste = (wertung, pfad, ziel)
+            if beste:
+                naechster = beste[1][1]
+                delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                 richtung = self.DELTA_TO_DIR.get(delta)
                 if richtung:
+                    self.recent_explore_targets.append(beste[2])
                     self.erwartete_pos = naechster
                     return richtung
-            self.unbesuchte_felder.discard(ziel)
+
         x, y = bot_pos
-        gerade_zeile = (y % 2 == 0)
-
-        # feste Bewegungsreihenfolge
-        prioritaet = []
-        if gerade_zeile:
-            prioritaet.append('E')  # gerade Zeilen-> nach rechts
-        else:
-            prioritaet.append('W')  # ungerade zeilen->nach links
-
-        prioritaet.append('S')  #unten
-        prioritaet.append('N')  #oben
-        prioritaet.append('W' if gerade_zeile else 'E')  #letzte Option==> zurück
-
-        for name in prioritaet:
-            dx, dy = self.DIR_MAP[name]
+        kandidaten = []
+        for name, (dx, dy) in self.DIR_MAP.items():
             nx = x + dx
             ny = y + dy
-            if self.im_feld(nx, ny) and (nx, ny) not in alle_walls:
-                self.unbesuchte_felder.discard((nx, ny))
-                self.erwartete_pos = (nx, ny)
-                return name
+            if not self.im_feld(nx, ny):
+                continue
+            if (nx, ny) in alle_walls:
+                continue
+            count = self.visit_count.get((nx, ny), 0)
+            kandidaten.append((count, name, (nx, ny)))
+        if kandidaten:
+            kandidaten.sort()
+            _, name, nxt = kandidaten[0]
+            self.erwartete_pos = nxt
+            return name
 
-        # Wenn alles blockiert ist ---> stehen bleiben
         self.erwartete_pos = tuple(bot_pos)
         return 'WAIT'
