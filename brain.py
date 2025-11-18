@@ -1,4 +1,5 @@
 from collections import deque
+import random
 from maps import MapState
 
 
@@ -34,10 +35,14 @@ class Brain:
         self.max_kombi = 4
         self.stage_max_gems = 0
         self.full_map_sicht = False
-        self.pos_history = deque(maxlen=4)
+        # kurze Historie gegen Hin-und-her-Flackern
+        self.pos_history = deque(maxlen=6)
         self.visit_count = {}
-        self.recent_explore_targets = deque(maxlen=20)
+        self.recent_explore_targets = deque(maxlen=60)
         self.aktuelles_explore_ziel = None
+        self.alle_floors = set()
+        self.idle_spot = None
+        self.rng = random.Random()
         self.map = MapState(
             visited_ref=self.besuchte_felder,
             walls_ref=self.bekannte_waende,
@@ -50,9 +55,14 @@ class Brain:
     def update_config(self, width, height, seed, config=None):
         self.width = width
         self.height = height
+        try:
+            self.rng.seed(seed)
+        except Exception:
+            self.rng.seed(0)
         self.map.update_config(width, height)
+        # Unvisited im vorhandenen Set belassen (Referenz in MapState!), nur Inhalte anpassen.
+        self.unbesuchte_felder.clear()
         if width > 0 and height > 0:
-            self.unbesuchte_felder = {(ix, iy) for ix in range(width) for iy in range(height)}
             x = max(1, min(width - 2, width // 2))
             y = max(1, min(height - 2, height // 2))
             self.center = (x, y)
@@ -63,6 +73,8 @@ class Brain:
                 self.full_map_sicht = (vis >= max(self.width, self.height))
             if self.stage_max_gems and self.stage_max_gems <= 1:
                 self.max_kombi = 1
+        # MapState-Referenz behalten
+        self.map.unvisited = self.unbesuchte_felder
 
     def im_feld(self, x, y):
         if self.width <= 0 or self.height <= 0:
@@ -76,6 +88,11 @@ class Brain:
         if walls:
             self.hat_wand_gesehen = True
         self.map.update_environment(bot_pos, walls, floors, self.DIR_MAP.values())
+        if self.full_map_sicht and floors:
+            # komplette Karte sichtbar -> alle Bodenfelder merken
+            self.alle_floors.update(floors)
+            if self.idle_spot is None and self.alle_floors:
+                self.idle_spot = self.find_idle_spot()
 
     def kombi_walls(self, walls):
         return self.map.kombi_walls(walls)
@@ -93,6 +110,7 @@ class Brain:
         self.erwartete_pos = None
         self.geplante_reisezeit = None
         self.aktuelles_explore_ziel = None
+        self.idle_spot = None
 
     def aktualisiere_gems(self, bot_pos, sichtbare_gems):
         bot_pos = tuple(bot_pos)
@@ -140,7 +158,7 @@ class Brain:
 
         return pfad
 
-    def bfs(self, start, ziel, walls):
+    def bfs(self, start, ziel, walls, allow_unknown=True):
         start = tuple(start)
         ziel = tuple(ziel)
         if start == ziel:
@@ -162,6 +180,8 @@ class Brain:
                 if not self.im_feld(nx, ny):
                     continue
                 if nachbar in walls:
+                    continue
+                if not allow_unknown and (nachbar not in self.bekannter_boden and nachbar != ziel):
                     continue
                 vorgaenger[nachbar] = (x, y)
                 queue.append(nachbar)
@@ -202,7 +222,7 @@ class Brain:
             key = (tuple(start), tuple(ziel))
             if key in pfad_cache:
                 return pfad_cache[key]
-            pfad = self.bfs(tuple(start), tuple(ziel), walls)
+            pfad = self.bfs(tuple(start), tuple(ziel), walls, allow_unknown=False)
             if pfad:
                 dist = len(pfad) - 1
                 pfad_cache[key] = (pfad, dist)
@@ -286,6 +306,67 @@ class Brain:
         _, bestes_gem, pfad, reisezeit = beste_wahl
         return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
 
+    def find_idle_spot(self):
+        # wähle Bodenfeld nahe am Median, damit durchschnittliche Weglänge zu Spawns klein ist
+        xs = [p[0] for p in self.alle_floors]
+        ys = [p[1] for p in self.alle_floors]
+        if not xs or not ys:
+            return self.center
+        xs_sorted = sorted(xs)
+        ys_sorted = sorted(ys)
+        mx = xs_sorted[len(xs_sorted) // 2]
+        my = ys_sorted[len(ys_sorted) // 2]
+        kandidat = (mx, my)
+        if kandidat in self.alle_floors:
+            return kandidat
+        # falls Median auf Wand liegt (sollte selten sein), nimm nächstgelegenes Bodenfeld
+        beste = None
+        for p in self.alle_floors:
+            d = strecke(kandidat, p)
+            if beste is None or d < beste[0]:
+                beste = (d, p)
+        return beste[1] if beste else self.center
+
+    def bfs_all(self, start, walls):
+        start = tuple(start)
+        queue = deque([start])
+        dist = {start: 0}
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in self.DIR_MAP.values():
+                nx = x + dx
+                ny = y + dy
+                nxt = (nx, ny)
+                if nxt in dist:
+                    continue
+                if nxt in walls:
+                    continue
+                if self.width > 0 and (nx < 0 or nx >= self.width or ny < 0 or ny >= self.height):
+                    continue
+                if self.alle_floors and nxt not in self.alle_floors:
+                    continue
+                dist[nxt] = dist[(x, y)] + 1
+                queue.append(nxt)
+        return dist
+
+    def find_graph_center(self, walls):
+        if not self.alle_floors:
+            return self.center
+        floors = list(self.alle_floors)
+        best = None
+        best_val = None
+        for tile in floors:
+            dist = self.bfs_all(tile, walls)
+            if len(dist) < len(floors):
+                continue
+            maxd = max(dist.values())
+            avgd = sum(dist.values()) / len(dist)
+            val = (maxd, avgd)
+            if best_val is None or val < best_val:
+                best_val = val
+                best = tile
+        return best if best else self.center
+
     def idle_move(self, bot_pos, walls):
         if not self.center:
             return 'WAIT'
@@ -314,9 +395,10 @@ class Brain:
         return 'WAIT'
 
     def stelle_plan_sicher(self, bot_pos, walls, gems):
+        # Einfach: nimm den nächsten sichtbaren Gem und plane den direkten Weg.
         self.reset_plan()
 
-        if not self.bekannte_gems:
+        if not gems and not self.bekannte_gems:
             return None, None, None
 
         ziel, bestes_gem, pfad, reisezeit = self.choose_target(bot_pos, walls)
@@ -406,7 +488,9 @@ class Brain:
 
         kandidaten_frontier = []
         if self.frontier_felder:
-            for ziel in self.frontier_felder:
+            ziel_liste = list(self.frontier_felder)
+            self.rng.shuffle(ziel_liste)
+            for ziel in ziel_liste:
                 if ziel in self.recent_explore_targets:
                     continue
                 pfad = self.bfs(bot_pos, ziel, alle_walls)
@@ -415,12 +499,15 @@ class Brain:
                 dist = len(pfad) - 1
                 unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
                 odw = self.visit_count.get(ziel, 0)
-                wertung = (dist + odw * 4, -unbekannte, odw, ziel, pfad)
+                jitter = self.rng.random() * 0.5
+                wertung = (dist + odw * 2 + jitter, -unbekannte, odw, ziel, pfad)
                 kandidaten_frontier.append(wertung)
 
         kandidaten_unvisited = []
         if self.unbesuchte_felder and not self.full_map_sicht:
-            for ziel in self.unbesuchte_felder:
+            ziel_unv = list(self.unbesuchte_felder)
+            self.rng.shuffle(ziel_unv)
+            for ziel in ziel_unv:
                 if ziel in self.recent_explore_targets:
                     continue
                 pfad = self.bfs(bot_pos, ziel, alle_walls)
@@ -428,7 +515,8 @@ class Brain:
                     continue
                 dist = len(pfad) - 1
                 odw = self.visit_count.get(ziel, 0)
-                wertung = (dist + odw * 4, odw, ziel, pfad)
+                jitter = self.rng.random() * 0.5
+                wertung = (dist + odw * 2 + jitter, odw, ziel, pfad)
                 kandidaten_unvisited.append(wertung)
 
         ziel_pfadrichtung = None
@@ -452,6 +540,37 @@ class Brain:
                 self.erwartete_pos = naechster
                 return richtung
 
+        # 3) Es gibt noch unbekannte Koordinaten (nicht gesehen, nicht als Wand): dorthin laufen.
+        if self.width > 0 and self.height > 0:
+            unseen = [
+                (x, y)
+                for x in range(self.width)
+                for y in range(self.height)
+                if (x, y) not in self.bekannter_boden
+                and (x, y) not in alle_walls
+                and (x, y) not in self.recent_explore_targets
+            ]
+            if unseen:
+                self.rng.shuffle(unseen)
+                kandidaten_unseen = []
+                for ziel in unseen[:200]:  # begrenze Aufwand
+                    pfad = self.bfs(bot_pos, ziel, alle_walls)  # allow_unknown=True
+                    if not pfad or len(pfad) < 2:
+                        continue
+                    dist = len(pfad) - 1
+                    kandidaten_unseen.append((dist, ziel, pfad))
+                if kandidaten_unseen:
+                    kandidaten_unseen.sort()
+                    _, ziel, pfad = kandidaten_unseen[0]
+                    self.aktuelles_explore_ziel = ziel
+                    self.recent_explore_targets.append(ziel)
+                    naechster = pfad[1]
+                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
+                    richtung = self.DELTA_TO_DIR.get(delta)
+                    if richtung:
+                        self.erwartete_pos = naechster
+                        return richtung
+
         if self.full_map_sicht and not self.bekannte_gems:
             if self.center and tuple(bot_pos) != self.center:
                 pfad_c = None
@@ -469,7 +588,7 @@ class Brain:
             self.erwartete_pos = tuple(bot_pos)
             return 'WAIT'
 
-        if self.unbesuchte_felder and not self.full_map_sicht:
+        if self.unbesuchte_felder:
             beste = None
             for ziel in self.unbesuchte_felder:
                 if ziel in self.recent_explore_targets:
@@ -490,8 +609,39 @@ class Brain:
                     self.erwartete_pos = naechster
                     return richtung
 
+        # Alles bekannt -> Patrouille: am wenigsten besuchte Felder, lieber weiter weg.
+        if self.bekannter_boden:
+            min_visit = min(self.visit_count.get(pos, 0) for pos in self.bekannter_boden)
+            beste_ziel = None
+            for ziel in self.bekannter_boden:
+                if ziel == tuple(bot_pos):
+                    continue
+                if ziel in self.recent_explore_targets:
+                    continue
+                odw = self.visit_count.get(ziel, 0)
+                if odw > min_visit:
+                    continue
+                dist = strecke(bot_pos, ziel)
+                wertung = (-dist, ziel)
+                if beste_ziel is None or wertung < beste_ziel[0]:
+                    beste_ziel = (wertung, ziel)
+
+            if beste_ziel:
+                ziel = beste_ziel[1]
+                pfad = self.bfs(bot_pos, ziel, alle_walls, allow_unknown=False)
+                if pfad and len(pfad) > 1:
+                    self.aktuelles_explore_ziel = ziel
+                    self.recent_explore_targets.append(ziel)
+                    naechster = pfad[1]
+                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
+                    richtung = self.DELTA_TO_DIR.get(delta)
+                    if richtung:
+                        self.erwartete_pos = naechster
+                        return richtung
+
         x, y = bot_pos
         kandidaten = []
+        prev = self.pos_history[-2] if len(self.pos_history) >= 2 else None
         for name, (dx, dy) in self.DIR_MAP.items():
             nx = x + dx
             ny = y + dy
@@ -500,10 +650,12 @@ class Brain:
             if (nx, ny) in alle_walls:
                 continue
             count = self.visit_count.get((nx, ny), 0)
-            kandidaten.append((count, name, (nx, ny)))
+            backtrack = 1 if prev and (nx, ny) == prev else 0
+            jitter = self.rng.random() * 0.3
+            kandidaten.append((count + jitter, backtrack, name, (nx, ny)))
         if kandidaten:
             kandidaten.sort()
-            _, name, nxt = kandidaten[0]
+            _, _, name, nxt = kandidaten[0]
             self.erwartete_pos = nxt
             return name
 

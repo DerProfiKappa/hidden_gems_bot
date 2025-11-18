@@ -17,9 +17,8 @@ class MapState:
     def update_config(self, width, height):
         self.width = width
         self.height = height
-        if width > 0 and height > 0:
-            self.unvisited.clear()
-            self.unvisited.update({(ix, iy) for ix in range(width) for iy in range(height)})
+        # Unvisited wird nach Sicht-Updates gefüllt
+        self.unvisited.clear()
         self.frontier.clear()
 
     def mark_visited(self, pos):
@@ -35,7 +34,9 @@ class MapState:
         for dx, dy in dir_map_values:
             nx = fx + dx
             ny = fy + dy
-            if not (0 <= nx < self.width or self.width <= 0) and not (0 <= ny < self.height or self.height <= 0):
+            if self.width > 0 and not (0 <= nx < self.width):
+                continue
+            if self.height > 0 and not (0 <= ny < self.height):
                 continue
             nachbar = (nx, ny)
             if nachbar in self.walls:
@@ -60,7 +61,10 @@ class MapState:
 
     def update_environment(self, bot_pos, walls, floors, dir_map_values):
         if walls:
-            self.walls.update(set(walls))
+            wand_set = set(walls)
+            self.walls.update(wand_set)
+            # Falls wir Koordinaten fälschlich als "unbesucht" hatten, hier säubern.
+            self.unvisited.difference_update(wand_set)
         sichtbarer_boden = set(floors)
         if sichtbarer_boden:
             self.floor.update(sichtbarer_boden)
