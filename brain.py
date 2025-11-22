@@ -43,6 +43,7 @@ class Brain:
         self.alle_floors = set()
         self.idle_spot = None
         self.full_map_sicht = False
+        self.occlusion = False
         self.stage_key = None
         self.generator = None
         self.mode = 'default'
@@ -51,6 +52,12 @@ class Brain:
         self.patrol_points = []
         self.patrol_index = 0
         self.rng = random.Random()
+        self.prev_cache_known = None
+        self.dist_cache_known = None
+        self.prev_cache_unknown = None
+        self.dist_cache_unknown = None
+        self.cache_origin = None
+        self.cache_walls_size = None
         self.map = MapState(
             visited_ref=self.besuchte_felder,
             walls_ref=self.bekannte_waende,
@@ -82,6 +89,12 @@ class Brain:
         self.mode = 'default'
         self.stage_key = None
         self.generator = None
+        self.prev_cache_known = None
+        self.dist_cache_known = None
+        self.prev_cache_unknown = None
+        self.dist_cache_unknown = None
+        self.cache_origin = None
+        self.cache_walls_size = None
         try:
             self.rng.seed(seed)
         except Exception:
@@ -95,16 +108,20 @@ class Brain:
             self.center = (x, y)
         if config:
             self.stage_key = config.get("stage_key")
-            self.generator = config.get("generator")
+            self.generator = config.get("generator", self.generator)
+            self.occlusion = (self.generator != 'arena')
             self.stage_max_gems = config.get("max_gems", self.stage_max_gems)
             vis = config.get("vis_radius")
             if vis is not None and max(self.width, self.height) > 0:
                 self.full_map_sicht = (vis >= max(self.width, self.height))
+            else:
+                self.full_map_sicht = False
             if self.stage_max_gems and self.stage_max_gems <= 1:
                 self.max_kombi = 1
-            if self.full_map_sicht and self.stage_max_gems and self.stage_max_gems <= 1:
-                if self.generator != 'arena':
+                if self.full_map_sicht:
                     self.mode = 'full_map_single_gem'
+                else:
+                    self.mode = 'single_patrol'
         # MapState-Referenz behalten
         self.map.unvisited = self.unbesuchte_felder
         self.reset_plan()
@@ -126,6 +143,10 @@ class Brain:
             self.alle_floors.update(floors)
             if self.idle_spot is None and self.alle_floors:
                 self.idle_spot = self.find_idle_spot()
+        # Bei unbekannter Karte: sobald genug Boden bekannt ist, wähle einen Median-Idle-Spot
+        if not self.full_map_sicht and self.idle_spot is None:
+            if len(self.bekannter_boden) >= max(20, (self.width * self.height) // 10):
+                self.idle_spot = self.find_idle_spot_partial()
         self.pruefe_map_komplett()
 
     def kombi_walls(self, walls):
@@ -152,7 +173,7 @@ class Brain:
             self.prepare_patrol_points(force=True)
 
     def prepare_patrol_points(self, force=False):
-        if self.mode != 'full_map_single_gem':
+        if self.mode not in ('full_map_single_gem', 'single_patrol'):
             self.patrol_points = []
             self.patrol_index = 0
             return
@@ -178,14 +199,18 @@ class Brain:
             return
         kandidaten.sort(key=lambda p: (dist[p], p[0], p[1]), reverse=True)
         route = [start]
-        for punkt in kandidaten[:4]:
+        if self.mode == 'full_map_single_gem':
+            ziel_count = 4
+        else:
+            ziel_count = 6
+        for punkt in kandidaten[:ziel_count]:
             if punkt not in route:
                 route.append(punkt)
         self.patrol_points = route
         self.patrol_index = 0
 
     def sollte_patrouillieren(self, sichtbare_gems):
-        if self.mode != 'full_map_single_gem':
+        if self.mode not in ('full_map_single_gem', 'single_patrol'):
             return False
         if not self.map_fully_known:
             return False
@@ -330,17 +355,22 @@ class Brain:
         pfad_cache = {}
 
         def hole_pfad(start, ziel):
-            key = (tuple(start), tuple(ziel))
+            s = tuple(start)
+            z = tuple(ziel)
+            key = (s, z)
             if key in pfad_cache:
                 return pfad_cache[key]
-            pfad = self.bfs(tuple(start), tuple(ziel), walls, allow_unknown=False)
+            pfad = self.bfs(s, z, walls, allow_unknown=False)
+            dist = len(pfad) - 1 if pfad else None
+            if not pfad:
+                pfad = self.bfs(s, z, walls, allow_unknown=True)
+                dist = len(pfad) - 1 if pfad else None
             if pfad:
-                dist = len(pfad) - 1
                 pfad_cache[key] = (pfad, dist)
                 rev = list(reversed(pfad))
-                pfad_cache[(tuple(ziel), tuple(start))] = (rev, dist)
-                return pfad_cache[key]
-            pfad_cache[key] = (None, None)
+                pfad_cache[(z, s)] = (rev, dist)
+            else:
+                pfad_cache[key] = (None, None)
             return pfad_cache[key]
 
         def route_besser(neu, alt):
@@ -383,6 +413,26 @@ class Brain:
         kandidaten = kandidaten[:8]
         beste_wahl = None
 
+        if self.stage_max_gems <= 1:
+            # einfach: nimm den erreichbaren Gem mit kürzester Distanz
+            for position, ttl in kandidaten:
+                if ttl <= 0:
+                    continue
+                pfad, dist = hole_pfad(bot_pos, position)
+                if not pfad:
+                    continue
+                arrival_ttl = ttl - dist
+                if arrival_ttl <= 0:
+                    continue
+                wertung = (dist, -arrival_ttl, position)
+                if beste_wahl is None or wertung < beste_wahl[0]:
+                    bestes_gem = {"position": list(position), "ttl": arrival_ttl}
+                    beste_wahl = (wertung, bestes_gem, pfad, dist)
+            if beste_wahl is None:
+                return None, None, None, None
+            _, bestes_gem, pfad, reisezeit = beste_wahl
+            return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
+
         for position, ttl in kandidaten:
             if ttl <= 0:
                 continue
@@ -417,6 +467,72 @@ class Brain:
         _, bestes_gem, pfad, reisezeit = beste_wahl
         return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
 
+    def bfs_prev(self, start, walls, allow_unknown):
+        start = tuple(start)
+        queue = deque([start])
+        vorgaenger = {start: None}
+        dist = {start: 0}
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in self.DIR_MAP.values():
+                nx = x + dx
+                ny = y + dy
+                if not self.im_feld(nx, ny):
+                    continue
+                nxt = (nx, ny)
+                if nxt in vorgaenger:
+                    continue
+                if nxt in walls:
+                    continue
+                if not allow_unknown and nxt not in self.bekannter_boden:
+                    continue
+                vorgaenger[nxt] = (x, y)
+                dist[nxt] = dist[(x, y)] + 1
+                queue.append(nxt)
+        return vorgaenger, dist
+
+    def pfad_aus_prev(self, prev, start, ziel):
+        if ziel not in prev:
+            return None
+        pfad = []
+        cur = ziel
+        while cur is not None:
+            pfad.append(cur)
+            cur = prev[cur]
+        pfad.reverse()
+        if pfad and pfad[0] == tuple(start):
+            return pfad
+        return None
+
+    def prepare_bfs_cache(self, bot_pos, walls):
+        walls_size = len(walls)
+        if self.cache_origin == tuple(bot_pos) and self.cache_walls_size == walls_size:
+            return
+        self.cache_origin = tuple(bot_pos)
+        self.cache_walls_size = walls_size
+        self.prev_cache_known, self.dist_cache_known = self.bfs_prev(bot_pos, walls, allow_unknown=False)
+        self.prev_cache_unknown, self.dist_cache_unknown = self.bfs_prev(bot_pos, walls, allow_unknown=True)
+
+    def greedy_towards(self, bot_pos, ziel, walls):
+        bx, by = bot_pos
+        zx, zy = ziel
+        beste = None
+        for name, (dx, dy) in self.RICHTUNG:
+            nx = bx + dx
+            ny = by + dy
+            if not self.im_feld(nx, ny):
+                continue
+            if (nx, ny) in walls:
+                continue
+            dist = strecke((nx, ny), (zx, zy))
+            besuche = self.visit_count.get((nx, ny), 0)
+            wert = (dist, besuche, name)
+            if beste is None or wert < beste[0]:
+                beste = (wert, name, (nx, ny))
+        if beste:
+            return beste[1], beste[2]
+        return None, None
+
     def find_idle_spot(self):
         # wähle Bodenfeld nahe am Median, damit durchschnittliche Weglänge zu Spawns klein ist
         xs = [p[0] for p in self.alle_floors]
@@ -433,6 +549,25 @@ class Brain:
         # falls Median auf Wand liegt (sollte selten sein), nimm nächstgelegenes Bodenfeld
         beste = None
         for p in self.alle_floors:
+            d = strecke(kandidat, p)
+            if beste is None or d < beste[0]:
+                beste = (d, p)
+        return beste[1] if beste else self.center
+
+    def find_idle_spot_partial(self):
+        if not self.bekannter_boden:
+            return self.center
+        xs = [p[0] for p in self.bekannter_boden]
+        ys = [p[1] for p in self.bekannter_boden]
+        xs_sorted = sorted(xs)
+        ys_sorted = sorted(ys)
+        mx = xs_sorted[len(xs_sorted) // 2]
+        my = ys_sorted[len(ys_sorted) // 2]
+        kandidat = (mx, my)
+        if kandidat in self.bekannter_boden:
+            return kandidat
+        beste = None
+        for p in self.bekannter_boden:
             d = strecke(kandidat, p)
             if beste is None or d < beste[0]:
                 beste = (d, p)
@@ -523,6 +658,15 @@ class Brain:
 
         ziel, bestes_gem, pfad, reisezeit = self.choose_target(bot_pos, walls)
         if not pfad:
+            if ziel:
+                schritt, nxt = self.greedy_towards(bot_pos, ziel, walls)
+                if schritt:
+                    self.plan = [(schritt, nxt)]
+                    self.geplantes_ziel = ziel
+                    self.geplanter_gem = bestes_gem
+                    self.geplante_reisezeit = None
+                    self.erwartete_pos = None
+                    return self.geplantes_ziel, self.geplanter_gem, self.geplante_reisezeit
             return None, None, None
 
         self.plan = self.pfad_zu_moves(pfad)
@@ -552,6 +696,13 @@ class Brain:
         self.aktualisiere_gems(bot_pos, gems)
 
         ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
+
+        # Gem bekannt, aber kein Plan? Dann trotzdem Schritt in Richtung Gem erzwingen.
+        if not self.plan and gem and ziel:
+            greedy_move, nxt = self.greedy_towards(bot_pos, ziel, alle_walls)
+            if greedy_move:
+                self.erwartete_pos = nxt
+                return greedy_move, ziel, gem, reisezeit, 0
 
         # Wenn wir 2 Ticks auf derselben Stelle stehen -> Plan verwerfen und zwingend explorieren
         if len(self.pos_history) >= 2 and self.pos_history[-1] == self.pos_history[-2]:
@@ -600,10 +751,16 @@ class Brain:
 
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
+        # BFS einmal pro Tick vorbereiten, damit wir das Soft-Limit nicht reißen
+        self.prepare_bfs_cache(bot_pos, alle_walls)
+        prev_known = self.prev_cache_known
+        dist_known = self.dist_cache_known
+        prev_unknown = self.prev_cache_unknown
+        dist_unknown = self.dist_cache_unknown
 
         # 0) aktives Explorationsziel weiterverfolgen, falls erreichbar
         if self.aktuelles_explore_ziel:
-            pfad = self.bfs(bot_pos, self.aktuelles_explore_ziel, alle_walls)
+            pfad = self.pfad_aus_prev(prev_known, bot_pos, self.aktuelles_explore_ziel)
             if pfad and len(pfad) > 1:
                 naechster = pfad[1]
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
@@ -616,61 +773,63 @@ class Brain:
 
         kandidaten_frontier = []
         if self.frontier_felder:
-            if self.mode == 'full_map_single_gem':
-                ziel_liste = sorted(
-                    self.frontier_felder,
-                    key=lambda pos: (self.visit_count.get(pos, 0), strecke(bot_pos, pos), pos[1], pos[0])
+            ziel_liste = sorted(
+                self.frontier_felder,
+                key=lambda pos: (
+                    self.visit_count.get(pos, 0),
+                    dist_known.get(pos, strecke(bot_pos, pos)),
+                    -self.zaehle_unbekannte_nachbarn(pos),
+                    pos[1],
+                    pos[0],
                 )
-            else:
-                ziel_liste = list(self.frontier_felder)
-                self.rng.shuffle(ziel_liste)
+            )
             for ziel in ziel_liste:
                 if ziel in self.recent_explore_targets:
                     continue
-                pfad = self.bfs(bot_pos, ziel, alle_walls)
-                if not pfad or len(pfad) < 2:
+                if ziel not in dist_known:
                     continue
-                dist = len(pfad) - 1
+                dist = dist_known[ziel]
                 unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
                 odw = self.visit_count.get(ziel, 0)
                 jitter = 0.0 if self.mode == 'full_map_single_gem' else self.rng.random() * 0.5
-                wertung = (dist + odw * 2 + jitter, -unbekannte, odw, ziel, pfad)
+                wertung = (dist + odw * 2 + jitter, -unbekannte, odw, ziel)
                 kandidaten_frontier.append(wertung)
 
         kandidaten_unvisited = []
         if self.unbesuchte_felder and not self.full_map_sicht:
-            if self.mode == 'full_map_single_gem':
-                ziel_unv = sorted(
-                    self.unbesuchte_felder,
-                    key=lambda pos: (self.visit_count.get(pos, 0), strecke(bot_pos, pos), pos[1], pos[0])
+            ziel_unv = sorted(
+                self.unbesuchte_felder,
+                key=lambda pos: (
+                    self.visit_count.get(pos, 0),
+                    dist_unknown.get(pos, strecke(bot_pos, pos)),
+                    pos[1],
+                    pos[0],
                 )
-            else:
-                ziel_unv = list(self.unbesuchte_felder)
-                self.rng.shuffle(ziel_unv)
+            )
             for ziel in ziel_unv:
                 if ziel in self.recent_explore_targets:
                     continue
-                pfad = self.bfs(bot_pos, ziel, alle_walls)
-                if not pfad or len(pfad) < 2:
+                if ziel not in dist_unknown:
                     continue
-                dist = len(pfad) - 1
+                dist = dist_unknown[ziel]
                 odw = self.visit_count.get(ziel, 0)
                 jitter = 0.0 if self.mode == 'full_map_single_gem' else self.rng.random() * 0.5
-                wertung = (dist + odw * 2 + jitter, odw, ziel, pfad)
+                wertung = (dist + odw * 2 + jitter, odw, ziel)
                 kandidaten_unvisited.append(wertung)
 
         ziel_pfadrichtung = None
         if kandidaten_frontier:
             kandidaten_frontier.sort()
-            _, _, _, ziel, pfad = kandidaten_frontier[0]
-            ziel_pfadrichtung = (ziel, pfad)
+            _, _, _, ziel = kandidaten_frontier[0]
+            ziel_pfadrichtung = (ziel, prev_known)
         elif kandidaten_unvisited:
             kandidaten_unvisited.sort()
-            _, _, ziel, pfad = kandidaten_unvisited[0]
-            ziel_pfadrichtung = (ziel, pfad)
+            _, _, ziel = kandidaten_unvisited[0]
+            ziel_pfadrichtung = (ziel, prev_unknown)
 
         if ziel_pfadrichtung:
-            ziel, pfad = ziel_pfadrichtung
+            ziel, prev_map = ziel_pfadrichtung
+            pfad = self.pfad_aus_prev(prev_map, bot_pos, ziel)
             self.aktuelles_explore_ziel = ziel
             self.recent_explore_targets.append(ziel)
             naechster = pfad[1]
@@ -682,29 +841,21 @@ class Brain:
 
         # 3) Es gibt noch unbekannte Koordinaten (nicht gesehen, nicht als Wand): dorthin laufen.
         if self.width > 0 and self.height > 0:
-            unseen = [
-                (x, y)
-                for x in range(self.width)
-                for y in range(self.height)
-                if (x, y) not in self.bekannter_boden
-                and (x, y) not in alle_walls
-                and (x, y) not in self.recent_explore_targets
-            ]
+            unseen = []
+            for pos, dist in dist_unknown.items():
+                if pos in self.bekannter_boden or pos in alle_walls:
+                    continue
+                if pos in self.recent_explore_targets:
+                    continue
+                unseen.append((dist, pos))
             if unseen:
                 if self.mode == 'full_map_single_gem':
-                    unseen.sort(key=lambda pos: (strecke(bot_pos, pos), pos[1], pos[0]))
+                    unseen.sort(key=lambda item: (item[0], item[1][1], item[1][0]))
                 else:
                     self.rng.shuffle(unseen)
-                kandidaten_unseen = []
-                for ziel in unseen[:200]:  # begrenze Aufwand
-                    pfad = self.bfs(bot_pos, ziel, alle_walls)  # allow_unknown=True
-                    if not pfad or len(pfad) < 2:
-                        continue
-                    dist = len(pfad) - 1
-                    kandidaten_unseen.append((dist, ziel, pfad))
-                if kandidaten_unseen:
-                    kandidaten_unseen.sort()
-                    _, ziel, pfad = kandidaten_unseen[0]
+                ziel = unseen[0][1]
+                pfad = self.pfad_aus_prev(prev_unknown, bot_pos, ziel)
+                if pfad and len(pfad) > 1:
                     self.aktuelles_explore_ziel = ziel
                     self.recent_explore_targets.append(ziel)
                     naechster = pfad[1]
