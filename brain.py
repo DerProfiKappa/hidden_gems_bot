@@ -1,6 +1,7 @@
 from collections import deque
 import random
 from maps import MapState
+from pathfinding import AStarPathfinder
 
 
 def strecke(a, b):
@@ -66,10 +67,16 @@ class Brain:
             frontier_ref=self.frontier_felder,
             visit_count_ref=self.visit_count
         )
+        self.pathfinder = AStarPathfinder()
+        # A*-Gewichte: Stage 1 bevorzugt neue Felder, meidet Sackgassen.
+        self.path_bias_default = {"visit": 0.06, "unknown": 0.35}
+        self.path_bias_known = {"visit": 0.04, "unknown": 0.0}
+        self.path_bias_explore = {"visit": 0.05, "unknown": 0.25}
 
     def update_config(self, width, height, seed, config=None):
         self.width = width
         self.height = height
+        self.pathfinder.update_bounds(width, height)
         self.hat_wand_gesehen = False
         self.besuchte_felder.clear()
         self.bekannte_gems.clear()
@@ -187,7 +194,7 @@ class Brain:
         start = self.graph_center or self.idle_spot or self.center
         if not start:
             start = next(iter(basis))
-        dist = self.bfs_all(start, self.bekannte_waende)
+        dist = self.distance_map(start, self.bekannte_waende, scope=basis)
         if not dist:
             self.patrol_points = [start]
             self.patrol_index = 0
@@ -228,7 +235,9 @@ class Brain:
                 self.patrol_index = (self.patrol_index + 1) % len(self.patrol_points)
                 versuche -= 1
                 continue
-            pfad = self.bfs(bot_pos, ziel, walls)
+            pfad, dist, _ = self.astar_path(
+                bot_pos, ziel, walls, allow_unknown=False, bias=self.path_bias_known
+            )
             if pfad and len(pfad) > 1:
                 naechster = pfad[1]
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
@@ -294,44 +303,18 @@ class Brain:
 
         return pfad
 
-    def bfs(self, start, ziel, walls, allow_unknown=True):
-        start = tuple(start)
-        ziel = tuple(ziel)
-        if start == ziel:
-            return [start]
-
-        queue = deque([start])
-        vorgaenger = {start: None}
-
-        while queue:
-            x, y = queue.popleft()
-            if (x, y) == ziel:
-                break
-            for dx, dy in self.DIR_MAP.values():
-                nx = x + dx
-                ny = y + dy
-                nachbar = (nx, ny)
-                if nachbar in vorgaenger:
-                    continue
-                if not self.im_feld(nx, ny):
-                    continue
-                if nachbar in walls:
-                    continue
-                if not allow_unknown and (nachbar not in self.bekannter_boden and nachbar != ziel):
-                    continue
-                vorgaenger[nachbar] = (x, y)
-                queue.append(nachbar)
-
-        if ziel not in vorgaenger:
-            return None
-
-        pfad = []
-        aktueller = ziel
-        while aktueller is not None:
-            pfad.append(aktueller)
-            aktueller = vorgaenger[aktueller]
-        pfad.reverse()
-        return pfad
+    def astar_path(self, start, ziel, walls, allow_unknown=True, bias=None):
+        """Wickelt die A*-Suche inkl. Stage-1-Bias ab."""
+        pfad, dist, kosten = self.pathfinder.find_path(
+            start=start,
+            goal=ziel,
+            walls=walls,
+            known_floor=self.bekannter_boden,
+            allow_unknown=allow_unknown,
+            visit_count=self.visit_count,
+            bias=bias or self.path_bias_default
+        )
+        return pfad, dist, kosten
 
     def pfad_zu_moves(self, pfad):
         moves = []
@@ -360,11 +343,13 @@ class Brain:
             key = (s, z)
             if key in pfad_cache:
                 return pfad_cache[key]
-            pfad = self.bfs(s, z, walls, allow_unknown=False)
-            dist = len(pfad) - 1 if pfad else None
+            pfad, dist, _ = self.astar_path(
+                s, z, walls, allow_unknown=False, bias=self.path_bias_known
+            )
             if not pfad:
-                pfad = self.bfs(s, z, walls, allow_unknown=True)
-                dist = len(pfad) - 1 if pfad else None
+                pfad, dist, _ = self.astar_path(
+                    s, z, walls, allow_unknown=True, bias=self.path_bias_default
+                )
             if pfad:
                 pfad_cache[key] = (pfad, dist)
                 rev = list(reversed(pfad))
@@ -467,29 +452,9 @@ class Brain:
         _, bestes_gem, pfad, reisezeit = beste_wahl
         return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
 
-    def bfs_prev(self, start, walls, allow_unknown):
-        start = tuple(start)
-        queue = deque([start])
-        vorgaenger = {start: None}
-        dist = {start: 0}
-        while queue:
-            x, y = queue.popleft()
-            for dx, dy in self.DIR_MAP.values():
-                nx = x + dx
-                ny = y + dy
-                if not self.im_feld(nx, ny):
-                    continue
-                nxt = (nx, ny)
-                if nxt in vorgaenger:
-                    continue
-                if nxt in walls:
-                    continue
-                if not allow_unknown and nxt not in self.bekannter_boden:
-                    continue
-                vorgaenger[nxt] = (x, y)
-                dist[nxt] = dist[(x, y)] + 1
-                queue.append(nxt)
-        return vorgaenger, dist
+    def build_distance_tree(self, start, walls, allow_unknown):
+        bekannte_tiles = self.bekannter_boden if self.bekannter_boden else {tuple(start)}
+        return self.pathfinder.build_distance_tree(start, walls, bekannte_tiles, allow_unknown)
 
     def pfad_aus_prev(self, prev, start, ziel):
         if ziel not in prev:
@@ -504,14 +469,14 @@ class Brain:
             return pfad
         return None
 
-    def prepare_bfs_cache(self, bot_pos, walls):
+    def prepare_distance_cache(self, bot_pos, walls):
         walls_size = len(walls)
         if self.cache_origin == tuple(bot_pos) and self.cache_walls_size == walls_size:
             return
         self.cache_origin = tuple(bot_pos)
         self.cache_walls_size = walls_size
-        self.prev_cache_known, self.dist_cache_known = self.bfs_prev(bot_pos, walls, allow_unknown=False)
-        self.prev_cache_unknown, self.dist_cache_unknown = self.bfs_prev(bot_pos, walls, allow_unknown=True)
+        self.prev_cache_known, self.dist_cache_known = self.build_distance_tree(bot_pos, walls, allow_unknown=False)
+        self.prev_cache_unknown, self.dist_cache_unknown = self.build_distance_tree(bot_pos, walls, allow_unknown=True)
 
     def greedy_towards(self, bot_pos, ziel, walls):
         bx, by = bot_pos
@@ -573,26 +538,10 @@ class Brain:
                 beste = (d, p)
         return beste[1] if beste else self.center
 
-    def bfs_all(self, start, walls):
-        start = tuple(start)
-        queue = deque([start])
-        dist = {start: 0}
-        while queue:
-            x, y = queue.popleft()
-            for dx, dy in self.DIR_MAP.values():
-                nx = x + dx
-                ny = y + dy
-                nxt = (nx, ny)
-                if nxt in dist:
-                    continue
-                if nxt in walls:
-                    continue
-                if self.width > 0 and (nx < 0 or nx >= self.width or ny < 0 or ny >= self.height):
-                    continue
-                if self.alle_floors and nxt not in self.alle_floors:
-                    continue
-                dist[nxt] = dist[(x, y)] + 1
-                queue.append(nxt)
+    def distance_map(self, start, walls, scope=None):
+        ziel_floors = scope if scope else self.bekannter_boden
+        bekannte_tiles = ziel_floors if ziel_floors else {tuple(start)}
+        _, dist = self.pathfinder.build_distance_tree(start, walls, bekannte_tiles, allow_unknown=False)
         return dist
 
     def find_graph_center(self, walls):
@@ -602,7 +551,7 @@ class Brain:
         best = None
         best_val = None
         for tile in floors:
-            dist = self.bfs_all(tile, walls)
+            dist = self.distance_map(tile, walls, scope=self.alle_floors)
             if len(dist) < len(floors):
                 continue
             maxd = max(dist.values())
@@ -639,7 +588,9 @@ class Brain:
             if self.im_feld(nx, ny) and (nx, ny) not in walls:
                 return name
 
-        pfad = self.bfs(bot_pos, zielpunkt, walls)
+        pfad, dist, _ = self.astar_path(
+            bot_pos, zielpunkt, walls, allow_unknown=False, bias=self.path_bias_known
+        )
         if pfad and len(pfad) > 1:
             naechster = pfad[1]
             delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
@@ -752,7 +703,7 @@ class Brain:
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
         # BFS einmal pro Tick vorbereiten, damit wir das Soft-Limit nicht reißen
-        self.prepare_bfs_cache(bot_pos, alle_walls)
+        self.prepare_distance_cache(bot_pos, alle_walls)
         prev_known = self.prev_cache_known
         dist_known = self.dist_cache_known
         prev_unknown = self.prev_cache_unknown
@@ -872,7 +823,9 @@ class Brain:
                 if not self.hat_wand_gesehen and not alle_walls:
                     pfad_c = self.manhattan_path(bot_pos, zielpunkt)
                 if pfad_c is None:
-                    pfad_c = self.bfs(bot_pos, zielpunkt, alle_walls)
+                    pfad_c, _, _ = self.astar_path(
+                        bot_pos, zielpunkt, alle_walls, allow_unknown=True, bias=self.path_bias_default
+                    )
                 if pfad_c and len(pfad_c) > 1:
                     naechster = pfad_c[1]
                     delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
@@ -888,7 +841,9 @@ class Brain:
             for ziel in self.unbesuchte_felder:
                 if ziel in self.recent_explore_targets:
                     continue
-                pfad = self.bfs(bot_pos, ziel, alle_walls)
+                pfad, _, _ = self.astar_path(
+                    bot_pos, ziel, alle_walls, allow_unknown=True, bias=self.path_bias_explore
+                )
                 if not pfad or len(pfad) < 2:
                     continue
                 dist = len(pfad) - 1
@@ -923,7 +878,9 @@ class Brain:
 
             if beste_ziel:
                 ziel = beste_ziel[1]
-                pfad = self.bfs(bot_pos, ziel, alle_walls, allow_unknown=False)
+                pfad, _, _ = self.astar_path(
+                    bot_pos, ziel, alle_walls, allow_unknown=False, bias=self.path_bias_known
+                )
                 if pfad and len(pfad) > 1:
                     self.aktuelles_explore_ziel = ziel
                     self.recent_explore_targets.append(ziel)
