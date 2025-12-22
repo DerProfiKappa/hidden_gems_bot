@@ -59,6 +59,10 @@ class Brain:
         self.dist_cache_unknown = None
         self.cache_origin = None
         self.cache_walls_size = None
+        self.gem_stats = {}
+        self.heat_recent_window = 200
+        self.aktuelles_heat_ziel = None
+        self.last_tick = -1
         self.map = MapState(
             visited_ref=self.besuchte_felder,
             walls_ref=self.bekannte_waende,
@@ -255,7 +259,7 @@ class Brain:
         self.geplanter_gem = None
         self.erwartete_pos = None
         self.geplante_reisezeit = None
-        self.aktuelles_explore_ziel = None
+        # self.aktuelles_explore_ziel = None
 
     def aktualisiere_gems(self, bot_pos, sichtbare_gems):
         bot_pos = tuple(bot_pos)
@@ -277,8 +281,8 @@ class Brain:
                 neue_cache[position] = ttl
 
         self.bekannte_gems = neue_cache
-        if not sichtbare_gems:
-            self.aktuelles_explore_ziel = None
+        # if not sichtbare_gems:
+        #    self.aktuelles_explore_ziel = None
 
     def manhattan_path(self, start, ziel):
         pfad = [tuple(start)]
@@ -634,6 +638,7 @@ class Brain:
             self.bekannte_waende.add(tuple(self.erwartete_pos))
             self.hat_wand_gesehen = True
             self.reset_plan()
+            self.aktuelles_explore_ziel = None
 
         # Positions-Historie und Kreisbrecher
         self.pos_history.append(tuple(bot_pos))
@@ -641,6 +646,7 @@ class Brain:
             for p in set(self.pos_history):
                 self.visit_count[p] = self.visit_count.get(p, 0) + 2
             self.reset_plan()
+            self.aktuelles_explore_ziel = None
 
         self.aktualisiere_umgebung(bot_pos, walls, floors)
         alle_walls = self.kombi_walls(walls)
@@ -660,6 +666,7 @@ class Brain:
             if walls:
                 self.bekannte_waende.intersection_update(walls)
             self.reset_plan()
+            self.aktuelles_explore_ziel = None
             force = self.explore_move(bot_pos, set(walls))
             if force != 'WAIT':
                 dx, dy = self.DIR_MAP[force]
@@ -712,6 +719,10 @@ class Brain:
         # 0) aktives Explorationsziel weiterverfolgen, falls erreichbar
         if self.aktuelles_explore_ziel:
             pfad = self.pfad_aus_prev(prev_known, bot_pos, self.aktuelles_explore_ziel)
+            if not pfad:
+                # Falls Ziel im Nebel liegt (Unseen), versuche es über unbekanntes Terrain
+                pfad = self.pfad_aus_prev(prev_unknown, bot_pos, self.aktuelles_explore_ziel)
+            
             if pfad and len(pfad) > 1:
                 naechster = pfad[1]
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
@@ -743,7 +754,9 @@ class Brain:
                 unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
                 odw = self.visit_count.get(ziel, 0)
                 jitter = 0.0 if self.mode == 'full_map_single_gem' else self.rng.random() * 0.5
-                wertung = (dist + odw * 2 + jitter, -unbekannte, odw, ziel)
+                # Weighted Frontier Search: Distance - (Unknown_Neighbors * 1.0)
+                score = dist - (unbekannte * 1.0) + (odw * 2.0) + jitter
+                wertung = (score, -unbekannte, odw, ziel)
                 kandidaten_frontier.append(wertung)
 
         kandidaten_unvisited = []
