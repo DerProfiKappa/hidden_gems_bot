@@ -79,6 +79,8 @@ class Brain:
         self.last_known_gem_keys = set()
         self.cached_gem_target = None
         self.explore_plan = []
+        self.tile_last_seen = {}
+        self.current_tick = 0
 
 
     def update_config(self, width, height, seed, config=None):
@@ -93,6 +95,8 @@ class Brain:
         self.frontier_felder.clear()
         self.unbesuchte_felder.clear()
         self.visit_count.clear()
+        self.tile_last_seen.clear()
+        self.current_tick = 0
         self.recent_explore_targets.clear()
         self.aktuelles_explore_ziel = None
         self.alle_floors.clear()
@@ -152,6 +156,11 @@ class Brain:
     def aktualisiere_umgebung(self, bot_pos, walls, floors):
         if walls:
             self.hat_wand_gesehen = True
+        
+        if floors:
+            for f in floors:
+                self.tile_last_seen[tuple(f)] = self.current_tick
+
         self.map.update_environment(bot_pos, walls, floors, self.DIR_MAP.values())
         if self.full_map_sicht and floors:
             # komplette Karte sichtbar -> alle Bodenfelder merken
@@ -665,6 +674,7 @@ class Brain:
         return self.geplantes_ziel, self.geplanter_gem, self.geplante_reisezeit
 
     def next_move(self, bot_pos, walls, floors, gems):
+        self.current_tick += 1
         # falls letzter Schritt blockiert war -> als Wand merken und neu planen
         if self.erwartete_pos and tuple(bot_pos) != tuple(self.erwartete_pos):
             self.bekannte_waende.add(tuple(self.erwartete_pos))
@@ -823,204 +833,78 @@ class Brain:
             else:
                 self.aktuelles_explore_ziel = None
 
-        kandidaten_frontier = []
+        # --- Unified Exploration Logic (Frontier + Heatmap) ---
+        candidates = []
+        
+        # 1. Frontier Candidates (Exploration)
         if self.frontier_felder:
-            ziel_liste = sorted(
-                self.frontier_felder,
-                key=lambda pos: (
-                    self.visit_count.get(pos, 0),
-                    dist_known.get(pos, strecke(bot_pos, pos)),
-                    -self.zaehle_unbekannte_nachbarn(pos),
-                    pos[1],
-                    pos[0],
-                )
-            )
-            for ziel in ziel_liste:
+            for ziel in self.frontier_felder:
                 if ziel in self.recent_explore_targets:
                     continue
                 if ziel not in dist_known:
                     continue
+                
                 dist = dist_known[ziel]
                 unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
-                odw = self.visit_count.get(ziel, 0)
-                jitter = 0.0 if self.mode == 'full_map_single_gem' else self.rng.random() * 0.5
-                # Weighted Frontier Search: Distance - (Unknown_Neighbors * 1.0)
-                score = dist - (unbekannte * 1.0) + (odw * 2.0) + jitter
-                wertung = (score, -unbekannte, odw, ziel)
-                kandidaten_frontier.append(wertung)
-
-        kandidaten_unvisited = []
-        if self.unbesuchte_felder and not self.full_map_sicht:
-            ziel_unv = sorted(
-                self.unbesuchte_felder,
-                key=lambda pos: (
-                    self.visit_count.get(pos, 0),
-                    dist_unknown.get(pos, strecke(bot_pos, pos)),
-                    pos[1],
-                    pos[0],
-                )
-            )
-            for ziel in ziel_unv:
-                if ziel in self.recent_explore_targets:
-                    continue
-                if ziel not in dist_unknown:
-                    continue
-                dist = dist_unknown[ziel]
-                odw = self.visit_count.get(ziel, 0)
-                jitter = 0.0 if self.mode == 'full_map_single_gem' else self.rng.random() * 0.5
-                wertung = (dist + odw * 2 + jitter, odw, ziel)
-                kandidaten_unvisited.append(wertung)
-
-        ziel_pfadrichtung = None
-        if kandidaten_frontier:
-            kandidaten_frontier.sort()
-            _, _, _, ziel = kandidaten_frontier[0]
-            ziel_pfadrichtung = (ziel, prev_known)
-        elif kandidaten_unvisited:
-            kandidaten_unvisited.sort()
-            _, _, ziel = kandidaten_unvisited[0]
-            ziel_pfadrichtung = (ziel, prev_unknown)
-
-        if ziel_pfadrichtung:
-            ziel, prev_map = ziel_pfadrichtung
-            pfad = self.pfad_aus_prev(prev_map, bot_pos, ziel)
-            self.aktuelles_explore_ziel = ziel
-            self.recent_explore_targets.append(ziel)
-            
-            if is_maze and pfad and len(pfad) > 1:
-                 self.explore_plan = pfad[1:]
-                 naechster = self.explore_plan.pop(0)
-            elif pfad and len(pfad) > 1:
-                 naechster = pfad[1]
-            else:
-                 naechster = None # Should not happen
-
-            if naechster:
-                delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
-                richtung = self.DELTA_TO_DIR.get(delta)
-                if richtung:
-                    self.erwartete_pos = naechster
-                    return richtung
-
-        # 3) Es gibt noch unbekannte Koordinaten (nicht gesehen, nicht als Wand): dorthin laufen.
-        if self.width > 0 and self.height > 0:
-            unseen = []
-            for pos, dist in dist_unknown.items():
-                if pos in self.bekannter_boden or pos in alle_walls:
-                    continue
-                if pos in self.recent_explore_targets:
-                    continue
-                unseen.append((dist, pos))
-            if unseen:
-                if self.mode == 'full_map_single_gem':
-                    unseen.sort(key=lambda item: (item[0], item[1][1], item[1][0]))
-                else:
-                    self.rng.shuffle(unseen)
-                ziel = unseen[0][1]
-                pfad = self.pfad_aus_prev(prev_unknown, bot_pos, ziel)
-                if pfad and len(pfad) > 1:
-                    self.aktuelles_explore_ziel = ziel
-                    self.recent_explore_targets.append(ziel)
-                    
-                    if is_maze:
-                        self.explore_plan = pfad[1:]
-                        naechster = self.explore_plan.pop(0)
-                    else:
-                        naechster = pfad[1]
-
-                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
-                    richtung = self.DELTA_TO_DIR.get(delta)
-                    if richtung:
-                        self.erwartete_pos = naechster
-                        return richtung
-
-        if self.full_map_sicht and not self.bekannte_gems:
-            zielpunkt = self.idle_spot or self.center
-            if zielpunkt and tuple(bot_pos) != tuple(zielpunkt):
-                pfad_c = None
-                if not self.hat_wand_gesehen and not alle_walls:
-                    pfad_c = self.manhattan_path(bot_pos, zielpunkt)
-                if pfad_c is None:
-                    pfad_c, _, _ = self.astar_path(
-                        bot_pos, zielpunkt, alle_walls, allow_unknown=True, bias=self.path_bias_default
-                    )
-                if pfad_c and len(pfad_c) > 1:
-                    # Idle spot is persistent? Maybe. But fluid is safer.
-                    naechster = pfad_c[1]
-                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
-                    richtung = self.DELTA_TO_DIR.get(delta)
-                    if richtung:
-                        self.erwartete_pos = naechster
-                        return richtung
-            self.erwartete_pos = tuple(bot_pos)
-            return 'WAIT'
-
-        if self.unbesuchte_felder:
-            beste = None
-            for ziel in self.unbesuchte_felder:
-                if ziel in self.recent_explore_targets:
-                    continue
-                pfad, _, _ = self.astar_path(
-                    bot_pos, ziel, alle_walls, allow_unknown=True, bias=self.path_bias_explore
-                )
-                if not pfad or len(pfad) < 2:
-                    continue
-                dist = len(pfad) - 1
-                wertung = (dist, ziel)
-                if beste is None or wertung < beste[0]:
-                    beste = (wertung, pfad, ziel)
-            if beste:
-                self.recent_explore_targets.append(beste[2])
-                # Unvisited search is rare fallback, stick to fluid/persistent based on is_maze?
-                # Assume persistent if maze.
-                if is_maze:
-                    self.explore_plan = beste[1][1:]
-                    naechster = self.explore_plan.pop(0)
-                else:
-                    naechster = beste[1][1]
+                # Value of revealing new tiles is high.
+                # Score = (Unknowns * 20) - Distance
+                score = (unbekannte * 20.0) - dist
                 
+                # Add tie-breakers (visits, randomization)
+                odw = self.visit_count.get(ziel, 0)
+                score -= odw * 2.0
+                
+                candidates.append((score, ziel, 'frontier'))
+
+        # 2. Patrol Candidates (Staleness/Heatmap)
+        # Only consider if we have known ground
+        if self.bekannter_boden:
+             # Optimization: Downsample or filter to avoid iterating 1000 tiles?
+             # But 1000 is small for Python.
+             for ziel in self.bekannter_boden:
+                 if ziel in self.recent_explore_targets:
+                     continue
+                 if ziel not in dist_known:
+                     continue
+                 
+                 last_seen = self.tile_last_seen.get(ziel, 0)
+                 staleness = self.current_tick - last_seen
+                 
+                 if staleness < 100:
+                     continue
+                 
+                 dist = dist_known[ziel]
+                 
+                 # Value of checking old ground.
+                 # 100 Staleness = 5 Points. Equiv to 5 Distance.
+                 score = (staleness * 0.05) - dist
+                 
+                 odw = self.visit_count.get(ziel, 0)
+                 score -= odw * 5.0 # Higher penalty for re-treading
+                 
+                 candidates.append((score, ziel, 'patrol'))
+
+        # 3. Pick Winner
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_ziel, type_ = candidates[0]
+            
+            pfad = self.pfad_aus_prev(prev_known, bot_pos, best_ziel)
+            if pfad and len(pfad) > 1:
+                self.aktuelles_explore_ziel = best_ziel
+                self.recent_explore_targets.append(best_ziel)
+                
+                if is_maze:
+                     self.explore_plan = pfad[1:]
+                     naechster = self.explore_plan.pop(0)
+                else:
+                     naechster = pfad[1]
+
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                 richtung = self.DELTA_TO_DIR.get(delta)
                 if richtung:
                     self.erwartete_pos = naechster
                     return richtung
-
-        # Alles bekannt -> Patrouille: am wenigsten besuchte Felder, lieber weiter weg.
-        if self.bekannter_boden:
-            min_visit = min(self.visit_count.get(pos, 0) for pos in self.bekannter_boden)
-            beste_ziel = None
-            for ziel in self.bekannter_boden:
-                if ziel == tuple(bot_pos):
-                    continue
-                if ziel in self.recent_explore_targets:
-                    continue
-                odw = self.visit_count.get(ziel, 0)
-                if odw > min_visit:
-                    continue
-                dist = strecke(bot_pos, ziel)
-                wertung = (-dist, ziel)
-                if beste_ziel is None or wertung < beste_ziel[0]:
-                    beste_ziel = (wertung, ziel)
-
-            if beste_ziel:
-                ziel = beste_ziel[1]
-                pfad, _, _ = self.astar_path(
-                    bot_pos, ziel, alle_walls, allow_unknown=False, bias=self.path_bias_known
-                )
-                if pfad and len(pfad) > 1:
-                    self.aktuelles_explore_ziel = ziel
-                    self.recent_explore_targets.append(ziel)
-                    if is_maze:
-                         self.explore_plan = pfad[1:]
-                         naechster = self.explore_plan.pop(0)
-                    else:
-                         naechster = pfad[1]
-                    
-                    delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
-                    richtung = self.DELTA_TO_DIR.get(delta)
-                    if richtung:
-                        self.erwartete_pos = naechster
-                        return richtung
 
         x, y = bot_pos
         kandidaten = []
