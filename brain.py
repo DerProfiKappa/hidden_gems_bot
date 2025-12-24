@@ -1,5 +1,6 @@
 from collections import deque
 import random
+import sys
 from maps import MapState
 from pathfinding import AStarPathfinder
 
@@ -752,36 +753,34 @@ class Brain:
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
         
-        # --- Maze Detection & Persistence ---
+        # --- Maze Detection ---
         total_known = len(self.bekannter_boden) + len(self.bekannte_waende)
-        wall_ratio = 0.0
-        if total_known > 0:
-            wall_ratio = len(self.bekannte_waende) / total_known
+        is_maze = False
         
-        # --- Maze Detection based on Neighbor Density ---
-        total_known = len(self.bekannter_boden)
-        is_maze = True # Default to Maze (Safer)
-        
-        if total_known > 50:
-             # Calculate Average Neighbors
-             import random
-             
-             floor_list = list(self.bekannter_boden) 
-             step = max(1, total_known // 50)
-             sample = floor_list[::step][:50]
-             
-             total_n = 0
-             count = 0
-             for sx, sy in sample:
-                 count += 1
-                 for _, (dx, dy) in self.RICHTUNG:
-                     if (sx+dx, sy+dy) in self.bekannter_boden:
-                         total_n += 1
-             
-             if count > 0:
-                 avg_n = total_n / count
-                 if avg_n > 2.9:
-                     is_maze = False
+        if total_known > 100:
+             ratio = len(self.bekannte_waende) / total_known
+             # Arena has ~20% walls (border). Mazes usually > 30%.
+             if ratio > 0.25:
+                 is_maze = True
+             else:
+                 # Secondary Check: Neighbor Density (Sparse Mazes)
+                 floor_list = list(self.bekannter_boden)
+                 if len(floor_list) > 50:
+                     step = max(1, len(floor_list) // 50)
+                     sample = floor_list[::step][:50]
+                     
+                     total_n = 0
+                     count = 0
+                     for sx, sy in sample:
+                         count += 1
+                         for _, (dx, dy) in self.RICHTUNG:
+                             if (sx+dx, sy+dy) in self.bekannter_boden:
+                                 total_n += 1
+                     
+                     if count > 0:
+                         avg_n = total_n / count
+                         if avg_n < 2.9:
+                             is_maze = True
         
         if is_maze and self.explore_plan:
              # Follow existing plan
@@ -858,7 +857,12 @@ class Brain:
 
         # 2. Patrol Candidates (Staleness/Heatmap)
         # Only consider if we have known ground
-        if self.bekannter_boden:
+        # MAZE LOGIC: If is_maze is True, ONLY patrol if we have NO frontier candidates.
+        should_patrol = True
+        if is_maze and candidates:
+             should_patrol = False
+
+        if self.bekannter_boden and should_patrol:
              # Optimization: Downsample or filter to avoid iterating 1000 tiles?
              # But 1000 is small for Python.
              for ziel in self.bekannter_boden:
@@ -876,8 +880,8 @@ class Brain:
                  dist = dist_known[ziel]
                  
                  # Value of checking old ground.
-                 # 100 Staleness = 5 Points. Equiv to 5 Distance.
-                 score = (staleness * 0.05) - dist
+                 # 100 Staleness = 10 Points. Equiv to 10 Distance.
+                 score = (staleness * 0.1) - dist
                  
                  odw = self.visit_count.get(ziel, 0)
                  score -= odw * 5.0 # Higher penalty for re-treading
