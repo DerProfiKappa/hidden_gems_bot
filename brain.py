@@ -76,6 +76,10 @@ class Brain:
         self.path_bias_default = {"visit": 0.06, "unknown": 0.35}
         self.path_bias_known = {"visit": 0.04, "unknown": 0.0}
         self.path_bias_explore = {"visit": 0.05, "unknown": 0.25}
+        self.last_known_gem_keys = set()
+        self.cached_gem_target = None
+        self.explore_plan = []
+
 
     def update_config(self, width, height, seed, config=None):
         self.width = width
@@ -337,7 +341,33 @@ class Brain:
             self.hat_wand_gesehen = True
 
         if not self.bekannte_gems:
+            self.cached_gem_target = None
             return None, None, None, None
+
+        # --- Cache Check ---
+        current_keys = set(self.bekannte_gems.keys())
+        if current_keys == self.last_known_gem_keys and self.cached_gem_target:
+            target_pos = self.cached_gem_target
+            if target_pos in self.bekannte_gems:
+                # Schnell-Check: Ist der Weg noch frei?
+                # Wir berechnen hier nur den Pfad zum Ziel (kein Combo-Check).
+                # Das spart massiv CPU.
+                pfad, dist, _ = self.astar_path(
+                    bot_pos, target_pos, walls, allow_unknown=False, bias=self.path_bias_known
+                )
+                if not pfad:
+                     pfad, dist, _ = self.astar_path(
+                        bot_pos, target_pos, walls, allow_unknown=True, bias=self.path_bias_default
+                    )
+                
+                if pfad:
+                    gem_data = {"position": list(target_pos), "ttl": self.bekannte_gems[target_pos]}
+                    return target_pos, gem_data, pfad, dist
+                # Falls Pfad blockiert, Fallback auf Neubererechnung
+        
+        # --- Full Search ---
+        self.last_known_gem_keys = current_keys
+        self.cached_gem_target = None # Reset
 
         pfad_cache = {}
 
@@ -420,6 +450,7 @@ class Brain:
             if beste_wahl is None:
                 return None, None, None, None
             _, bestes_gem, pfad, reisezeit = beste_wahl
+            self.cached_gem_target = tuple(bestes_gem["position"])
             return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
 
         for position, ttl in kandidaten:
@@ -454,6 +485,7 @@ class Brain:
             return None, None, None, None
 
         _, bestes_gem, pfad, reisezeit = beste_wahl
+        self.cached_gem_target = tuple(bestes_gem["position"])
         return tuple(bestes_gem["position"]), bestes_gem, pfad, reisezeit
 
     def build_distance_tree(self, start, walls, allow_unknown):
@@ -709,6 +741,58 @@ class Brain:
 
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
+        
+        # --- Maze Detection & Persistence ---
+        total_known = len(self.bekannter_boden) + len(self.bekannte_waende)
+        wall_ratio = 0.0
+        if total_known > 0:
+            wall_ratio = len(self.bekannte_waende) / total_known
+        
+        # --- Maze Detection based on Neighbor Density ---
+        total_known = len(self.bekannter_boden)
+        is_maze = True # Default to Maze (Safer)
+        
+        if total_known > 50:
+             # Calculate Average Neighbors
+             import random
+             
+             floor_list = list(self.bekannter_boden) 
+             step = max(1, total_known // 50)
+             sample = floor_list[::step][:50]
+             
+             total_n = 0
+             count = 0
+             for sx, sy in sample:
+                 count += 1
+                 for _, (dx, dy) in self.RICHTUNG:
+                     if (sx+dx, sy+dy) in self.bekannter_boden:
+                         total_n += 1
+             
+             if count > 0:
+                 avg_n = total_n / count
+                 if avg_n > 2.9:
+                     is_maze = False
+        
+        if is_maze and self.explore_plan:
+             # Follow existing plan
+             # Convert path coords to direction? 
+             # explore_plan stores coords [step1, step2, ...]
+             next_step = self.explore_plan[0]
+             if next_step in alle_walls:
+                 self.explore_plan = [] # Invalid
+             else:
+                 # Calculate direction
+                 delta = (next_step[0] - bot_pos[0], next_step[1] - bot_pos[1])
+                 richtung = self.DELTA_TO_DIR.get(delta)
+                 if richtung:
+                     self.explore_plan.pop(0) # Consume step
+                     self.erwartete_pos = next_step
+                     return richtung
+                 else:
+                     # Bot is not adjacent to next step? Resync.
+                     self.explore_plan = []
+        
+        # --- Standard Exploration (Fluid) ---
         # BFS einmal pro Tick vorbereiten, damit wir das Soft-Limit nicht reißen
         self.prepare_distance_cache(bot_pos, alle_walls)
         prev_known = self.prev_cache_known
@@ -724,7 +808,13 @@ class Brain:
                 pfad = self.pfad_aus_prev(prev_unknown, bot_pos, self.aktuelles_explore_ziel)
             
             if pfad and len(pfad) > 1:
-                naechster = pfad[1]
+                if is_maze:
+                     # Store full path for persistence
+                     self.explore_plan = pfad[1:] # Skip start
+                     naechster = self.explore_plan.pop(0)
+                else:
+                     naechster = pfad[1]
+                
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                 richtung = self.DELTA_TO_DIR.get(delta)
                 if richtung:
@@ -796,12 +886,21 @@ class Brain:
             pfad = self.pfad_aus_prev(prev_map, bot_pos, ziel)
             self.aktuelles_explore_ziel = ziel
             self.recent_explore_targets.append(ziel)
-            naechster = pfad[1]
-            delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
-            richtung = self.DELTA_TO_DIR.get(delta)
-            if richtung:
-                self.erwartete_pos = naechster
-                return richtung
+            
+            if is_maze and pfad and len(pfad) > 1:
+                 self.explore_plan = pfad[1:]
+                 naechster = self.explore_plan.pop(0)
+            elif pfad and len(pfad) > 1:
+                 naechster = pfad[1]
+            else:
+                 naechster = None # Should not happen
+
+            if naechster:
+                delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
+                richtung = self.DELTA_TO_DIR.get(delta)
+                if richtung:
+                    self.erwartete_pos = naechster
+                    return richtung
 
         # 3) Es gibt noch unbekannte Koordinaten (nicht gesehen, nicht als Wand): dorthin laufen.
         if self.width > 0 and self.height > 0:
@@ -822,7 +921,13 @@ class Brain:
                 if pfad and len(pfad) > 1:
                     self.aktuelles_explore_ziel = ziel
                     self.recent_explore_targets.append(ziel)
-                    naechster = pfad[1]
+                    
+                    if is_maze:
+                        self.explore_plan = pfad[1:]
+                        naechster = self.explore_plan.pop(0)
+                    else:
+                        naechster = pfad[1]
+
                     delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                     richtung = self.DELTA_TO_DIR.get(delta)
                     if richtung:
@@ -840,6 +945,7 @@ class Brain:
                         bot_pos, zielpunkt, alle_walls, allow_unknown=True, bias=self.path_bias_default
                     )
                 if pfad_c and len(pfad_c) > 1:
+                    # Idle spot is persistent? Maybe. But fluid is safer.
                     naechster = pfad_c[1]
                     delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                     richtung = self.DELTA_TO_DIR.get(delta)
@@ -864,11 +970,18 @@ class Brain:
                 if beste is None or wertung < beste[0]:
                     beste = (wertung, pfad, ziel)
             if beste:
-                naechster = beste[1][1]
+                self.recent_explore_targets.append(beste[2])
+                # Unvisited search is rare fallback, stick to fluid/persistent based on is_maze?
+                # Assume persistent if maze.
+                if is_maze:
+                    self.explore_plan = beste[1][1:]
+                    naechster = self.explore_plan.pop(0)
+                else:
+                    naechster = beste[1][1]
+                
                 delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                 richtung = self.DELTA_TO_DIR.get(delta)
                 if richtung:
-                    self.recent_explore_targets.append(beste[2])
                     self.erwartete_pos = naechster
                     return richtung
 
@@ -897,7 +1010,12 @@ class Brain:
                 if pfad and len(pfad) > 1:
                     self.aktuelles_explore_ziel = ziel
                     self.recent_explore_targets.append(ziel)
-                    naechster = pfad[1]
+                    if is_maze:
+                         self.explore_plan = pfad[1:]
+                         naechster = self.explore_plan.pop(0)
+                    else:
+                         naechster = pfad[1]
+                    
                     delta = (naechster[0] - bot_pos[0], naechster[1] - bot_pos[1])
                     richtung = self.DELTA_TO_DIR.get(delta)
                     if richtung:
