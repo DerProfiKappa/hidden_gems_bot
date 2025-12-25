@@ -82,6 +82,9 @@ class Brain:
         self.explore_plan = []
         self.tile_last_seen = {}
         self.current_tick = 0
+        # Gem Spawn Heatmap: track where gems have spawned historically
+        self.gem_spawn_history = {}  # pos -> spawn count
+        self.seen_gem_positions = set()  # track gems we've already counted
 
 
     def update_config(self, width, height, seed, config=None):
@@ -98,6 +101,8 @@ class Brain:
         self.visit_count.clear()
         self.tile_last_seen.clear()
         self.current_tick = 0
+        self.gem_spawn_history.clear()
+        self.seen_gem_positions.clear()
         self.recent_explore_targets.clear()
         self.aktuelles_explore_ziel = None
         self.alle_floors.clear()
@@ -283,6 +288,9 @@ class Brain:
             rest = ttl - 1
             if rest > 0 and pos != bot_pos:
                 neue_cache[pos] = rest
+            elif pos == bot_pos:
+                # Gem collected - clear from seen so we can track respawns
+                self.seen_gem_positions.discard(pos)
 
         for gem in sichtbare_gems:
             position = tuple(gem.get("position", []))
@@ -293,6 +301,11 @@ class Brain:
                 except (TypeError, ValueError):
                     continue
                 neue_cache[position] = ttl
+                
+                # Track new gem spawn for heatmap
+                if position not in self.seen_gem_positions:
+                    self.seen_gem_positions.add(position)
+                    self.gem_spawn_history[position] = self.gem_spawn_history.get(position, 0) + 1
 
         self.bekannte_gems = neue_cache
         # if not sichtbare_gems:
@@ -882,6 +895,23 @@ class Brain:
                  # Value of checking old ground.
                  # 100 Staleness = 10 Points. Equiv to 10 Distance.
                  score = (staleness * 0.1) - dist
+                 
+                 # Gem Spawn Heatmap Bonus: prioritize areas where gems have spawned before
+                 spawn_count = self.gem_spawn_history.get(ziel, 0)
+                 if spawn_count > 0:
+                     # Direct hit on spawn location: moderate bonus
+                     score += spawn_count * 8.0
+                 else:
+                     # Check nearby tiles for spawn hotspots (radius 2)
+                     nearby_spawns = 0
+                     for dx in range(-2, 3):
+                         for dy in range(-2, 3):
+                             if dx == 0 and dy == 0:
+                                 continue
+                             neighbor = (ziel[0] + dx, ziel[1] + dy)
+                             nearby_spawns += self.gem_spawn_history.get(neighbor, 0)
+                     if nearby_spawns > 0:
+                         score += nearby_spawns * 1.5  # Smaller bonus for being near spawn zone
                  
                  odw = self.visit_count.get(ziel, 0)
                  score -= odw * 5.0 # Higher penalty for re-treading
