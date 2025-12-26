@@ -46,6 +46,24 @@ class MapState:
             unbekannte += 1
         return unbekannte
 
+    def hole_unbekannte_nachbarn(self, feld, dir_map_values):
+        fx, fy = feld
+        unbekannte = []
+        for dx, dy in dir_map_values:
+            nx = fx + dx
+            ny = fy + dy
+            if self.width > 0 and not (0 <= nx < self.width):
+                continue
+            if self.height > 0 and not (0 <= ny < self.height):
+                continue
+            nachbar = (nx, ny)
+            if nachbar in self.walls:
+                continue
+            if nachbar in self.floor:
+                continue
+            unbekannte.append(nachbar)
+        return unbekannte
+
     def aktualisiere_frontier(self, dir_map_values):
         if not self.floor:
             self.frontier.clear()

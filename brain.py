@@ -34,7 +34,7 @@ class Brain:
         self.bekannte_waende = set()
         self.bekannter_boden = set()
         self.unbesuchte_felder = set()
-        self.max_kombi = 6
+        self.max_kombi = 7
         self.stage_max_gems = 0
         self.full_map_sicht = False
         # kurze Historie gegen Hin-und-her-Flackern
@@ -64,6 +64,7 @@ class Brain:
         self.heat_recent_window = 200
         self.aktuelles_heat_ziel = None
         self.last_tick = -1
+        self.is_maze_state = False
         self.map = MapState(
             visited_ref=self.besuchte_felder,
             walls_ref=self.bekannte_waende,
@@ -81,6 +82,7 @@ class Brain:
         self.cached_gem_target = None
         self.explore_plan = []
         self.tile_last_seen = {}
+        self.gem_path_cache = {}
         self.current_tick = 0
         # Gem Spawn Heatmap: track where gems have spawned historically
         self.gem_spawn_history = {}  # pos -> spawn count
@@ -162,6 +164,7 @@ class Brain:
     def aktualisiere_umgebung(self, bot_pos, walls, floors):
         if walls:
             self.hat_wand_gesehen = True
+            self.gem_path_cache.clear() # Paths might be blocked
         
         if floors:
             for f in floors:
@@ -384,14 +387,21 @@ class Brain:
         self.last_known_gem_keys = current_keys
         self.cached_gem_target = None # Reset
 
-        pfad_cache = {}
+        # pfad_cache removed, using self.gem_path_cache
 
         def hole_pfad(start, ziel):
             s = tuple(start)
             z = tuple(ziel)
             key = (s, z)
-            if key in pfad_cache:
-                return pfad_cache[key]
+            if key in self.gem_path_cache:
+                return self.gem_path_cache[key]
+            
+            # Note: We use walls from map state (self.bekannte_waende) implicitly via pathfinder?
+            # actually choose_target receives 'walls' argument which are NEW walls.
+            # But the pathfinder needs ALL walls.
+            # astar_path uses 'walls' arg. We should ensure it includes known walls.
+            # In next_move, we pass 'alle_walls' to choose_target. Correct.
+            
             pfad, dist, _ = self.astar_path(
                 s, z, walls, allow_unknown=False, bias=self.path_bias_known
             )
@@ -399,13 +409,16 @@ class Brain:
                 pfad, dist, _ = self.astar_path(
                     s, z, walls, allow_unknown=True, bias=self.path_bias_default
                 )
+            
+            # Cache result
             if pfad:
-                pfad_cache[key] = (pfad, dist)
+                self.gem_path_cache[key] = (pfad, dist)
                 rev = list(reversed(pfad))
-                pfad_cache[(z, s)] = (rev, dist)
+                self.gem_path_cache[(z, s)] = (rev, dist)
             else:
-                pfad_cache[key] = (None, None)
-            return pfad_cache[key]
+                self.gem_path_cache[key] = (None, None)
+            
+            return self.gem_path_cache[key]
 
         def route_besser(neu, alt):
             if alt is None:
@@ -445,7 +458,21 @@ class Brain:
 
         # Sort candidates by Distance first, then TTL descending.
         # This prioritizes clearing nearby gems to minimize global decay.
-        kandidaten = sorted(self.bekannte_gems.items(), key=lambda item: (strecke(bot_pos, item[0]), -item[1]))
+        # Use True Distance (Dijkstra) instead of Manhattan to avoid wall-clipping hallucinations.
+        def gem_sort_key(item):
+            pos, ttl = item
+            if self.dist_cache_known and pos in self.dist_cache_known:
+                dist = self.dist_cache_known[pos]
+            elif self.dist_cache_unknown and pos in self.dist_cache_unknown:
+                dist = self.dist_cache_unknown[pos]
+            else:
+                dist = strecke(bot_pos, pos)
+            # Penalize unreachable gems heavily so they drop to the end
+            if dist > 10000: # Arbitrary large number if unconnected
+                 pass 
+            return (dist, -ttl)
+
+        kandidaten = sorted(self.bekannte_gems.items(), key=gem_sort_key)
         kandidaten = kandidaten[:12]
         beste_wahl = None
 
@@ -700,6 +727,7 @@ class Brain:
 
         self.aktualisiere_umgebung(bot_pos, walls, floors)
         alle_walls = self.kombi_walls(walls)
+        self.prepare_distance_cache(bot_pos, alle_walls)
         self.aktualisiere_gems(bot_pos, gems)
 
         ziel, gem, reisezeit = self.stelle_plan_sicher(bot_pos, alle_walls, gems)
@@ -760,35 +788,42 @@ class Brain:
     def explore_move(self, bot_pos, walls):
         alle_walls = self.kombi_walls(walls)
         
-        # --- Maze Detection ---
+        # --- Maze Detection with Hysteresis ---
         total_known = len(self.bekannter_boden) + len(self.bekannte_waende)
-        is_maze = False
         
+        # Calculate metrics
+        ratio = 0.0
         if total_known > 100:
              ratio = len(self.bekannte_waende) / total_known
-             # Arena has ~20% walls (border). Mazes usually > 30%.
-             if ratio > 0.25:
-                 is_maze = True
-             else:
-                 # Secondary Check: Neighbor Density (Sparse Mazes)
-                 floor_list = list(self.bekannter_boden)
-                 if len(floor_list) > 50:
-                     step = max(1, len(floor_list) // 50)
-                     sample = floor_list[::step][:50]
-                     
-                     total_n = 0
-                     count = 0
-                     for sx, sy in sample:
-                         count += 1
-                         for _, (dx, dy) in self.RICHTUNG:
-                             if (sx+dx, sy+dy) in self.bekannter_boden:
-                                 total_n += 1
-                     
-                     if count > 0:
-                         avg_n = total_n / count
-                         if avg_n < 2.9:
-                             is_maze = True
         
+        avg_n = 4.0
+        floor_list = list(self.bekannter_boden)
+        if len(floor_list) > 50:
+             step = max(1, len(floor_list) // 50)
+             sample = floor_list[::step][:50]
+             total_n = 0
+             count = 0
+             for sx, sy in sample:
+                 count += 1
+                 for _, (dx, dy) in self.RICHTUNG:
+                     if (sx+dx, sy+dy) in self.bekannter_boden:
+                         total_n += 1
+             if count > 0:
+                 avg_n = total_n / count
+
+        # Hysteresis Logic
+        # Thresholds: Open < 0.29 < Unstable < 0.31 < Maze
+        if self.is_maze_state:
+             # Currently Maze. Switch to Open if CLEARLY Open.
+             if ratio < 0.29 and avg_n > 2.6:
+                 self.is_maze_state = False
+        else:
+             # Currently Open. Switch to Maze if CLEARLY Maze.
+             if ratio > 0.31 or avg_n < 2.5:
+                 self.is_maze_state = True
+        
+        is_maze = self.is_maze_state
+
         if is_maze and self.explore_plan:
              # Follow existing plan
              # Convert path coords to direction? 
@@ -860,14 +895,51 @@ class Brain:
                     continue
                 
                 dist = dist_known[ziel]
-                unbekannte = self.zaehle_unbekannte_nachbarn(ziel)
-                # Value of revealing new tiles is high.
-                # Score = (Unknowns * 20) - Distance
-                score = (unbekannte * 20.0) - dist
+                
+                # Deep Fog Heuristic (2-Layer Lookahead)
+                layer1_unknowns = self.map.hole_unbekannte_nachbarn(ziel, self.DIR_MAP.values())
+                c1 = len(layer1_unknowns)
+                
+                c2 = 0
+                if c1 > 0:
+                    # Look deeper into the fog
+                    # Sample up to 2 neighbors to save CPU? No, iterate all (max 4).
+                    for unk_pos in layer1_unknowns:
+                        # We don't want to recount the original tile 'ziel' (it's in floor, so zaehle_unbekannte skips it)
+                        # But we might double count shared neighbors. That's actually OK (indicates open area).
+                        c2 += self.map.zaehle_unbekannte_nachbarn(unk_pos, self.DIR_MAP.values())
+
+                # Hybrid Strategy:
+                # Maze -> Deep Search (20.0)
+                # Open -> Greedy Sweep (2.0)
+                weight = 20.0 if self.is_maze_state else 2.0
+                
+                # Formula: Score = (Layer1 * Weight) + (Layer2 * (Weight * Factor)) - Distance
+                # Deep fog (Layer 2) is worth 20% of immediate fog.
+                # Strictly disable for Mazes (1ht3c3u sensitivity).
+                bonus_layer2 = 0.0
+                if not self.is_maze_state:
+                     bonus_layer2 = c2 * (weight * 0.2)
+
+                score = (c1 * weight) + bonus_layer2 - dist
                 
                 # Add tie-breakers (visits, randomization)
                 odw = self.visit_count.get(ziel, 0)
                 score -= odw * 2.0
+                
+                # Momentum Bias: Slight bonus for targets in front of us (avoids jitter)
+                if self.pos_history and len(self.pos_history) >= 2:
+                    last = self.pos_history[-1]
+                    prev = self.pos_history[-2]
+                    dx = last[0] - prev[0]
+                    dy = last[1] - prev[1]
+                    if dx != 0 or dy != 0:
+                        # Vector to target
+                        tx = ziel[0] - last[0]
+                        ty = ziel[1] - last[1]
+                        # Dot product positive?
+                        if (dx * tx + dy * ty) > 0:
+                            score += 0.5 # Small push forward
                 
                 candidates.append((score, ziel, 'frontier'))
 
@@ -875,7 +947,7 @@ class Brain:
         # Only consider if we have known ground
         # MAZE LOGIC: If is_maze is True, ONLY patrol if we have NO frontier candidates.
         should_patrol = True
-        if is_maze and candidates:
+        if self.is_maze_state and candidates:
              should_patrol = False
 
         if self.bekannter_boden and should_patrol:
