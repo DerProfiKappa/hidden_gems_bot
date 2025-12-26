@@ -34,7 +34,7 @@ class Brain:
         self.bekannte_waende = set()
         self.bekannter_boden = set()
         self.unbesuchte_felder = set()
-        self.max_kombi = 4
+        self.max_kombi = 6
         self.stage_max_gems = 0
         self.full_map_sicht = False
         # kurze Historie gegen Hin-und-her-Flackern
@@ -288,9 +288,6 @@ class Brain:
             rest = ttl - 1
             if rest > 0 and pos != bot_pos:
                 neue_cache[pos] = rest
-            elif pos == bot_pos:
-                # Gem collected - clear from seen so we can track respawns
-                self.seen_gem_positions.discard(pos)
 
         for gem in sichtbare_gems:
             position = tuple(gem.get("position", []))
@@ -301,11 +298,6 @@ class Brain:
                 except (TypeError, ValueError):
                     continue
                 neue_cache[position] = ttl
-                
-                # Track new gem spawn for heatmap
-                if position not in self.seen_gem_positions:
-                    self.seen_gem_positions.add(position)
-                    self.gem_spawn_history[position] = self.gem_spawn_history.get(position, 0) + 1
 
         self.bekannte_gems = neue_cache
         # if not sichtbare_gems:
@@ -451,8 +443,10 @@ class Brain:
                     beste = kandidat
             return beste
 
-        kandidaten = sorted(self.bekannte_gems.items(), key=lambda item: (-item[1], strecke(bot_pos, item[0])))
-        kandidaten = kandidaten[:8]
+        # Sort candidates by Distance first, then TTL descending.
+        # This prioritizes clearing nearby gems to minimize global decay.
+        kandidaten = sorted(self.bekannte_gems.items(), key=lambda item: (strecke(bot_pos, item[0]), -item[1]))
+        kandidaten = kandidaten[:12]
         beste_wahl = None
 
         if self.stage_max_gems <= 1:
@@ -824,10 +818,19 @@ class Brain:
 
         # 0) aktives Explorationsziel weiterverfolgen, falls erreichbar
         if self.aktuelles_explore_ziel:
-            pfad = self.pfad_aus_prev(prev_known, bot_pos, self.aktuelles_explore_ziel)
-            if not pfad:
-                # Falls Ziel im Nebel liegt (Unseen), versuche es über unbekanntes Terrain
-                pfad = self.pfad_aus_prev(prev_unknown, bot_pos, self.aktuelles_explore_ziel)
+            # Smart Abort: If the target is no longer a frontier, stop only if it is far away.
+            # This prevents jitter in tight mazes (1ht3c3u) while saving time in open maps (18v6r2n).
+            dist_to_target = strecke(bot_pos, self.aktuelles_explore_ziel)
+            if self.aktuelles_explore_ziel not in self.frontier_felder and dist_to_target > 6:
+                self.aktuelles_explore_ziel = None
+            
+            pfad = None
+            # Additional check needed because we might have just set it to None
+            if self.aktuelles_explore_ziel:
+                pfad = self.pfad_aus_prev(prev_known, bot_pos, self.aktuelles_explore_ziel)
+                if not pfad:
+                    # Falls Ziel im Nebel liegt (Unseen), versuche es über unbekanntes Terrain
+                    pfad = self.pfad_aus_prev(prev_unknown, bot_pos, self.aktuelles_explore_ziel)
             
             if pfad and len(pfad) > 1:
                 if is_maze:
@@ -895,23 +898,6 @@ class Brain:
                  # Value of checking old ground.
                  # 100 Staleness = 10 Points. Equiv to 10 Distance.
                  score = (staleness * 0.1) - dist
-                 
-                 # Gem Spawn Heatmap Bonus: prioritize areas where gems have spawned before
-                 spawn_count = self.gem_spawn_history.get(ziel, 0)
-                 if spawn_count > 0:
-                     # Direct hit on spawn location: moderate bonus
-                     score += spawn_count * 8.0
-                 else:
-                     # Check nearby tiles for spawn hotspots (radius 2)
-                     nearby_spawns = 0
-                     for dx in range(-2, 3):
-                         for dy in range(-2, 3):
-                             if dx == 0 and dy == 0:
-                                 continue
-                             neighbor = (ziel[0] + dx, ziel[1] + dy)
-                             nearby_spawns += self.gem_spawn_history.get(neighbor, 0)
-                     if nearby_spawns > 0:
-                         score += nearby_spawns * 1.5  # Smaller bonus for being near spawn zone
                  
                  odw = self.visit_count.get(ziel, 0)
                  score -= odw * 5.0 # Higher penalty for re-treading
